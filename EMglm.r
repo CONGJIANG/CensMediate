@@ -1,5 +1,5 @@
 library(data.table) # Assuming 'data' is a data.table
-n_obs <- 5
+n_obs <- 500
 (data <- Study_dgp_Mcensor(n_obs = n_obs, lod = 1.0))
 sum(data$study_dat$censored)/n_obs *100
 
@@ -159,12 +159,14 @@ M_stepf_M(data = data_weted, LOD = LOD_value, beta_m)
 
 
 # EM Algorithm
-EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 1000, tol = 1e-26) {
+EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 1000, tol = 1e-16) {
   iter <- 0
   diff <- Inf
   # I-Step
   data_imputed <- Impute_step(data, beta_m_0, S)
   mod_pred <- mod_update_glm(data_imputed)
+  beta_m <- beta_m_0
+  
   while (iter < max_iter && diff > tol) {
     # W-Step
     data_weted <- Wet_step(data_imputed, mod_pred, beta_m_new = beta_m, beta_m_0 = beta_m, LOD = LOD_value)
@@ -174,10 +176,14 @@ EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 100
     
     # Calculate convergence criteria
     diff <- sum((beta_m_new - beta_m)^2)
-    
+    cen_coef_old <- mod_pred$cen_coef
+    out_coef_old <- mod_pred$out_coef
+
     # parameter updating
     beta_m <- beta_m_new
     mod_pred <- mod_update_glm(data_weted)
+    
+    diff <- diff + sum((mod_pred$cen_coef - cen_coef_old)^2) + sum((mod_pred$out_coef - out_coef_old)^2)
     iter <- iter + 1
     cat("Iteration:", iter, "Difference:", diff, "\n")
   }
