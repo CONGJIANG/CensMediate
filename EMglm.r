@@ -196,5 +196,96 @@ EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 100
 beta_m <- c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)
 LOD_value <- 1.0  # Set the LOD value
 # Run the EM algorithm
-EM_algorithm(dataset, beta_m)
+dat_aug <- EM_algorithm(dataset, beta_m)
 
+dat_aug <- dat_aug$data_weted
+dim(dat_aug)
+head(dat_aug)
+
+
+gcomp <- function(data) {
+  # Extract variables from the dataset
+  y <- data$Y        # Assuming Y is the outcome variable
+  m <- data$M        # Assuming M is the mediator
+  a <- data$A        # Assuming A is the treatment
+  l1 <- data$L1      # Assuming L1 is the first covariate
+  l2 <- data$L2      # Assuming L2 is the second covariate
+  l3 <- data$L3      # Assuming L3 is the third covariate
+  weights <- data$w_norm  # Extract the weights
+  
+  # Combine L1, L2, L3 into a data frame for modeling convenience
+  covariates <- data.frame(l1 = l1, l2 = l2, l3 = l3)
+  
+  # Fit a weighted linear model for y including m, a, and covariates
+  lm_y <- lm(y ~ m + a + l1 + l2 + l3, weights = weights)
+  
+  # Predict potential outcomes under different treatments
+  pred_y1 <- predict(lm_y, newdata = transform(covariates, a = 1, m = m))
+  pred_y0 <- predict(lm_y, newdata = transform(covariates, a = 0, m = m))
+  
+  # Calculate the pseudo outcome
+  pseudo <- pred_y1 - pred_y0
+  
+  # Fit a weighted linear model using the pseudo outcome
+  lm_pseudo <- lm(pseudo ~ a + l1 + l2 + l3, weights = weights)
+  
+  # Predict the causal effect when a = 0
+  pred_pseudo <- predict(lm_pseudo, newdata = transform(covariates, a = 0))
+  
+  # Calculate and return the estimate
+  estimate <- mean(pred_pseudo)
+  return(estimate)
+}
+
+
+estimate <- gcomp(dat_aug)
+print(estimate)
+
+dat_aug
+
+
+# instantiate learners
+mean_lrnr <- Lrnr_mean$new()
+fglm_lrnr <- Lrnr_glm_fast$new()
+lasso_lrnr <- Lrnr_glmnet$new(alpha = 1, nfolds = 3)
+rf_lrnr <- Lrnr_ranger$new(num.trees = 200)
+
+# create learner library and instantiate super learner ensemble
+lrnr_lib <- Stack$new(mean_lrnr, fglm_lrnr, lasso_lrnr, rf_lrnr)
+sl_lrnr <- Lrnr_sl$new(learners = lrnr_lib, metalearner = Lrnr_nnls$new())
+
+
+# compute one-step estimate of the natural direct effect
+nde_onestep <- medoutcon(
+  W = dat_aug[, c("L1", "L2", "L3")],
+  A = as.numeric(dat_aug$A),
+  Z = NULL,
+  M = dat_aug$M,
+  Y = dat_aug$Y,
+  obs_weights = dat_aug$w_norm,
+  g_learners = lasso_lrnr,
+  h_learners = lasso_lrnr,
+  b_learners = lasso_lrnr,
+  effect = "direct",
+  estimator = "onestep",
+  estimator_args = list(cv_folds = 5)
+)
+summary(nde_onestep)
+
+
+# compute one-step estimate of the natural indirect effect
+nie_onestep <- medoutcon(
+  W = dat_aug[, c("L1", "L2", "L3")],
+  A = as.numeric(dat_aug$A),
+  Z = NULL,
+  M = dat_aug$M,
+  Y = dat_aug$Y,
+  obs_weights = dat_aug$w_norm,
+  g_learners = lasso_lrnr,
+  h_learners = lasso_lrnr,
+  b_learners = lasso_lrnr,
+  effect = "indirect",
+  estimator = "onestep",
+  estimator_args = list(cv_folds = 5)
+)
+summary(nie_onestep)

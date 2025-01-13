@@ -1,3 +1,5 @@
+# Clear the entire environment
+rm(list = ls())
 # Load necessary package
 library(data.table)
 # Observational Study with an assay lower limit (Lower Limit of Detection, LOD) for the mediator variable
