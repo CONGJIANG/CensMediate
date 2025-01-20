@@ -1,7 +1,11 @@
 library(data.table) # Assuming 'data' is a data.table
+library(dplyr)
+library(sl3)
+library(medoutcon)
 n_obs <- 500
-(data <- Study_dgp_Mcensor(n_obs = n_obs, lod = 1.0))
-sum(data$study_dat$censored)/n_obs *100
+
+(data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.3))
+(LOD <- data$lod)
 
 head(data$study_dat)
 head(data$study_dat_full)
@@ -32,7 +36,7 @@ compute_f_M <- function(data, LOD, beta_m) {
 
 ########################################
 beta_m <- c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)
-LOD_value <- 1.0  # Set the LOD value
+LOD_value <- as.numeric(data$lod)  # Set the LOD value
 library(truncnorm)
 
 # Define the E-step
@@ -194,7 +198,7 @@ EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 100
 
 # Define initial guesses for beta_m parameters
 beta_m <- c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)
-LOD_value <- 1.0  # Set the LOD value
+LOD_value <- as.numeric(data$lod)  # Set the LOD value
 # Run the EM algorithm
 dat_aug <- EM_algorithm(dataset, beta_m)
 
@@ -203,7 +207,7 @@ dim(dat_aug)
 head(dat_aug)
 
 
-gcomp <- function(data) {
+gcomp.nde <- function(data) {
   # Extract variables from the dataset
   y <- data$Y        # Assuming Y is the outcome variable
   m <- data$M        # Assuming M is the mediator
@@ -238,10 +242,43 @@ gcomp <- function(data) {
 }
 
 
-estimate <- gcomp(dat_aug)
-print(estimate)
+nde_gcom <- gcomp.nde(dat_aug)
+print(nde_gcom)
 
-dat_aug
+
+
+gcomp.nie <- function(data) {
+  # Extract variables from the dataset
+  y <- data$Y        # Outcome variable
+  m <- data$M        # Mediator
+  a <- data$A        # Treatment
+  l1 <- data$L1      # Covariate 1
+  l2 <- data$L2      # Covariate 2
+  l3 <- data$L3      # Covariate 3
+  weights <- data$w_norm  # Weights for weighted regression
+  
+  # Combine covariates into a data frame for modeling convenience
+  covariates <- data.frame(l1 = l1, l2 = l2, l3 = l3)
+  
+  # Fit a weighted linear model for y including m, a, and covariates
+  lm_y <- lm(y ~ m + a + l1 + l2 + l3, weights = weights)
+  
+  # Predict potential outcomes under different treatments
+  pred_y1 <- predict(lm_y, newdata = transform(covariates, a = 1, m = m))
+  
+  # Fit a weighted linear model using the predict potential outcomes
+  lm_y1 <- lm(pred_y1 ~ a + l1 + l2 + l3, weights = weights)
+  
+  # Predict the causal effect when a = 0
+  y1 <- predict(lm_y1, newdata = transform(covariates, a = 1))
+  y0 <- predict(lm_y1, newdata = transform(covariates, a = 0))
+  
+  # Calculate and return the estimate
+  nid <- mean(y1 - y0)
+  # Return the estimate of the indirect effect
+  return(nid)
+}
+gcomp.nie(dat_aug)
 
 
 # instantiate learners
@@ -273,6 +310,24 @@ nde_onestep <- medoutcon(
 summary(nde_onestep)
 
 
+# compute tmle estimate of the natural direct effect
+nde_tmle <- medoutcon(
+  W = dat_aug[, c("L1", "L2", "L3")],
+  A = as.numeric(dat_aug$A),
+  Z = NULL,
+  M = dat_aug$M,
+  Y = dat_aug$Y,
+  obs_weights = dat_aug$w_norm,
+  g_learners = lasso_lrnr,
+  h_learners = lasso_lrnr,
+  b_learners = lasso_lrnr,
+  effect = "direct",
+  estimator = "tmle",
+  estimator_args = list(cv_folds = 5)
+)
+summary(nde_tmle)
+
+
 # compute one-step estimate of the natural indirect effect
 nie_onestep <- medoutcon(
   W = dat_aug[, c("L1", "L2", "L3")],
@@ -289,3 +344,20 @@ nie_onestep <- medoutcon(
   estimator_args = list(cv_folds = 5)
 )
 summary(nie_onestep)
+
+
+nie_tmle <- medoutcon(
+  W = dat_aug[, c("L1", "L2", "L3")],
+  A = as.numeric(dat_aug$A),
+  Z = NULL,
+  M = dat_aug$M,
+  Y = dat_aug$Y,
+  obs_weights = dat_aug$w_norm,
+  g_learners = lasso_lrnr,
+  h_learners = lasso_lrnr,
+  b_learners = lasso_lrnr,
+  effect = "indirect",
+  estimator = "tmle",
+  estimator_args = list(cv_folds = 5)
+)
+summary(nie_tmle)

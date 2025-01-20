@@ -8,6 +8,7 @@ library(data.table)
 #  - n_obs:  Number of study units to generate for the observational study.
 #  - return_dgp: Logical indicating whether to return the data-generating
 #                functions in addition to the simulated data.
+#  - random: Randomization trial or not. FALSE means observational study
 #
 # return:
 #  A data frame of `n_obs` study units from an observationl study in which 
@@ -15,13 +16,13 @@ library(data.table)
 # - study_dat: A data frame of `n_obs` study units with censoring for M1.
 # - study_dat_full: A data frame of `n_obs` study units without censoring for M1.
 
-Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, shape = 3, scale = 1, lod = NULL, censor_rate = 0.7, return_dgp = FALSE) {
+Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, lod = NULL, censor_rate = 0.3, return_dgp = TRUE) {
   # Generate baseline covariates (e.g., demographic characteristics)
   L1 <- rbinom(n_obs, 1, 0.7)
   L2 <- rbinom(n_obs, 1, 0.5)
   L3 <- rbinom(n_obs, 1, 0.25)
   
-  # Generate infection status as a function of baseline covariates, depending on randomization
+  # Generate exposure status as a function of baseline covariates, depending on randomization
   gA <- function(L1, L2, L3, random) {
     if (random) {
       return(rep(0.5, length(L1)))  # Fixed probability if randomized
@@ -38,7 +39,9 @@ Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, shape = 3, scale = 1
     return(list(QM = QM))
   }
   QM_obs <- QM(A, L1, L2, L3)
-  M_full <- round(rweibull(n_obs, shape = shape, scale = scale) * (1 + QM_obs$QM), 3)
+  M_full <- rnorm(n_obs, QM_obs$QM + 2.5, 0.25)
+  # summary(M_full)
+  # different distribution, e.g., round(rweibull(n_obs, shape = shape, scale = scale) * (1 + QM_obs$QM), 3)
   
   # Apply fixed LOD for censoring
   if (is.null(lod)) {
@@ -72,7 +75,8 @@ Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, shape = 3, scale = 1
     out <- list(
       "study_dat" = study_dat,
       "study_dat_full" = study_dat_full,
-      "dgp_funs" = dgp_funs
+      "dgp_funs" = dgp_funs,
+      "lod" = lod
     )
   } else {
     out <- list(
@@ -86,24 +90,24 @@ Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, shape = 3, scale = 1
 
 
 n_obs <- 5000
-(data <- Study_dgp_Mcensor(n_obs = n_obs, lod = 1.0))
-sum(data$study_dat$censored)/n_obs *100
+(data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.3))
+data$lod
 
 head(data$study_dat)
 head(data$study_dat_full)
 
-
-summary(data$study_dat$M1)
-summary(data$study_dat_full$M1)
-
+summary(data$study_dat$M)
+summary(data$study_dat_full$M)
 
 
-# Approximate Average Treatment Effect (ATE), Natural Direct and Indirect Effects
+
+# Approximate Average Treatment Effect (ATE), Natural Direct and Indirect Effects (NDE/NIE)
 #
 # parameters:
 #  - gen_data: A function that generates data from a data-generating process.
 #  - n_truth: Number of observations to generate for an "asymptotic" sample
 #              in which the plug-in estimator of the ATE will be used.
+#  - random: Randomization trial or not. FALSE means observational study
 #
 # return:
 #   A list containing:
@@ -111,7 +115,6 @@ summary(data$study_dat_full$M1)
 #   var_eif: Variance bound via the efficient influence function (EIF).
 #   nde: Natural direct effect (NDE).
 #   nie: Natural indirect effect (NIE).
-
 get_truth <- function(gen_data, random = FALSE, n_truth = 1e7) {
   # Compute large data set from data-generating mechanism
   dgp <- gen_data(n_obs = n_truth, random =random, return_dgp = TRUE)
@@ -131,43 +134,64 @@ get_truth <- function(gen_data, random = FALSE, n_truth = 1e7) {
   # compute post-infection labs and biomarkers in "asymptotic" sample for
   # counterfactual data where all units are exposed (A = 1)
   QM_Ais1_mech <- with(wow_so_much_data, QM(1, L1, L2, L3))
-  M1_Ais1 <- rnorm(n_truth, QM_Ais1_mech$QM, 1)
+  M1_Ais1 <- rnorm(n_truth, QM_Ais1_mech$QM + 2.5, 0.25)
   
   # compute post-infection labs and biomarkers in "asymptotic" sample for
   # counterfactual data where all units are unexposed (A = 0)
   QM_Ais0_mech <- with(wow_so_much_data, QM(0, L1, L2, L3))
-  M1_Ais0 <- rnorm(n_truth, QM_Ais0_mech$QM, 1)
+  M1_Ais0 <- rnorm(n_truth, QM_Ais0_mech$QM + 2.5, 0.25)
   
   # Compute outcome of interest in "asymptotic" sample
-  QY_mech <- with(wow_so_much_data, QY(A, M, L1, L2, L3))
-  QY_Ais1_mech <- with(wow_so_much_data, QY(1, M1_Ais1, L1, L2, L3))
-  QY_Ais0_mech <- with(wow_so_much_data, QY(0, M1_Ais0, L1, L2, L3))
+  Y_mech <- with(wow_so_much_data, QY(A, M, L1, L2, L3))
+  QY_mech <- rbinom(n_truth, 1, plogis(Y_mech) )
+  
+  Y_Ais1_mech <- with(wow_so_much_data, QY(1, M1_Ais1, L1, L2, L3))
+  Y_Ais0_mech <- with(wow_so_much_data, QY(0, M1_Ais0, L1, L2, L3))
+  
+  QY_Ais1_mech <- rbinom(n_truth, 1, plogis(Y_Ais1_mech) )
+  QY_Ais0_mech <- rbinom(n_truth, 1, plogis(Y_Ais0_mech) )
   
 
   # Compute average treatment effect (ATE) via plug-in in "asymptotic" sample
-  ate_approx <- mean(QY_Ais1_mech - QY_Ais0_mech)
+  ate_rd <- mean(QY_Ais1_mech) - mean(QY_Ais0_mech)
+  ate_rr <- mean(QY_Ais1_mech)/mean(QY_Ais0_mech)
+  ate_or <- (mean(QY_Ais1_mech)/(1 - mean(QY_Ais1_mech)))/(mean(QY_Ais0_mech)/(1 - mean(QY_Ais0_mech)))
   
   # Compute direct and indirect effects
-  QY_corss_mech <- with(wow_so_much_data, QY(1, M1_Ais0, L1, L2, L3))
-  nie <- mean(QY_Ais1_mech - QY_corss_mech)  # Natural Indirect Effect
-  nde <- mean(QY_corss_mech - QY_Ais0_mech)  # Natural Direct Effect
+  Y_corss_mech <- with(wow_so_much_data, QY(1, M1_Ais0, L1, L2, L3))
+  QY_corss_mech <- rbinom(n_truth, 1, plogis(Y_corss_mech) )
+  
+  nie_rd <- mean(QY_Ais1_mech) - mean(QY_corss_mech)  # Natural Indirect Effect RD
+  nie_rr <- mean(QY_Ais1_mech)/mean(QY_corss_mech)  # Natural Indirect Effect RR
+  nie_or <- (mean(QY_Ais1_mech)/(1 - mean(QY_Ais1_mech)))/(mean(QY_corss_mech)/(1-mean(QY_corss_mech)) ) # Natural Indirect Effect OR
+  
+  nde_rd <- mean(QY_corss_mech) - mean(QY_Ais0_mech)  # Natural Direct Effect RD
+  nde_rr <- mean(QY_corss_mech)/mean(QY_Ais0_mech)  # Natural Direct Effect RD
+  nde_or <- (mean(QY_corss_mech)/(1-mean(QY_corss_mech)) )/(mean(QY_Ais0_mech)/(1 - mean(QY_Ais0_mech)))  # Natural Direct Effect RD
 
   
   # Compute the variance bound via the EIF
+  # EIF for ATE
   eif_Ais1 <- (wow_so_much_data$A == 1) / gA_mech * (wow_so_much_data$Y - QY_mech) + QY_Ais1_mech
   eif_Ais0 <- (wow_so_much_data$A == 0) / (1 - gA_mech) * (wow_so_much_data$Y - QY_mech) + QY_Ais0_mech
-  eif_ate <- (eif_Ais1 - eif_Ais0) - ate_approx
+  eif_ate <- (eif_Ais1 - eif_Ais0) - ate_rd
   
-  # EIF for 
+  # EIF for NIE and NDE
   return(list(
-    psi_est = ate_approx,
+    psi_rd = ate_rd,
+    psi_rr = ate_rr,
+    psi_or = ate_rr,
     var_eif = var(eif_ate),
-    nde = nde,
-    nie = nie
+    RD.nde = nde_rd,
+    RD.nie = nie_rd,
+    RR.nde = nde_rr,
+    RR.nie = nie_rr,
+    OR.nde = nde_or,
+    OR.nie = nie_or
   ))
 }
 
-get_truth(Study_dgp_Mcensor)
+(truth <- get_truth(gen_data = Study_dgp_Mcensor))
 
 
 
