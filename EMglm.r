@@ -2,7 +2,7 @@ library(data.table) # Assuming 'data' is a data.table
 library(dplyr)
 library(sl3)
 library(medoutcon)
-n_obs <- 500
+n_obs <- 5000
 
 (data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.3))
 (LOD <- data$lod)
@@ -221,29 +221,28 @@ gcomp.nde <- function(data) {
   covariates <- data.frame(l1 = l1, l2 = l2, l3 = l3)
   
   # Fit a weighted linear model for y including m, a, and covariates
-  lm_y <- lm(y ~ m + a + l1 + l2 + l3, weights = weights)
+  lm_y <- glm(y ~ m + a + l1 + l2 + l3, weights = weights, family = binomial)
   
   # Predict potential outcomes under different treatments
-  pred_y1 <- predict(lm_y, newdata = transform(covariates, a = 1, m = m))
-  pred_y0 <- predict(lm_y, newdata = transform(covariates, a = 0, m = m))
-  
-  # Calculate the pseudo outcome
-  pseudo <- pred_y1 - pred_y0
+  pred_y1 <- predict(lm_y, newdata = transform(covariates, a = 1, m = m), type = "response")
+  pred_y0 <- predict(lm_y, newdata = transform(covariates, a = 0, m = m), type = "response")
   
   # Fit a weighted linear model using the pseudo outcome
-  lm_pseudo <- lm(pseudo ~ a + l1 + l2 + l3, weights = weights)
+  lm_y1 <- glm(pred_y1 ~ a + l1 + l2 + l3, weights = weights, family = binomial)
+  lm_y0 <- glm(pred_y0 ~ a + l1 + l2 + l3, weights = weights, family = binomial)
   
   # Predict the causal effect when a = 0
-  pred_pseudo <- predict(lm_pseudo, newdata = transform(covariates, a = 0))
+  y1 <- predict(lm_y1, newdata = transform(covariates, a = 0), type = "response")
+  y0 <- predict(lm_y0, newdata = transform(covariates, a = 0), type = "response")
   
   # Calculate and return the estimate
-  estimate <- mean(pred_pseudo)
-  return(estimate)
+  nde.rd <- mean(y1 - y0); nde.rr <- mean(y1)/mean(y0); nde.or <- (mean(y1)/(1-mean(y1))) / (mean(y0)/(1-mean(y0)))
+  return(list(nde.rd = nde.rd, nde.rr = nde.rr, nde.or = nde.or))
 }
 
 
 nde_gcom <- gcomp.nde(dat_aug)
-print(nde_gcom)
+nde_gcom
 
 
 
@@ -261,25 +260,24 @@ gcomp.nie <- function(data) {
   covariates <- data.frame(l1 = l1, l2 = l2, l3 = l3)
   
   # Fit a weighted linear model for y including m, a, and covariates
-  lm_y <- lm(y ~ m + a + l1 + l2 + l3, weights = weights)
+  lm_y <- glm(y ~ m + a + l1 + l2 + l3, weights = weights, family = binomial)
   
   # Predict potential outcomes under different treatments
-  pred_y1 <- predict(lm_y, newdata = transform(covariates, a = 1, m = m))
-  
+  pred_y1 <- predict(lm_y, newdata = transform(covariates, a = 1, m = m),  type = "response")
   # Fit a weighted linear model using the predict potential outcomes
-  lm_y1 <- lm(pred_y1 ~ a + l1 + l2 + l3, weights = weights)
+  lm_y1 <- glm(pred_y1 ~ a + l1 + l2 + l3, weights = weights,  family = binomial)
   
   # Predict the causal effect when a = 0
-  y1 <- predict(lm_y1, newdata = transform(covariates, a = 1))
-  y0 <- predict(lm_y1, newdata = transform(covariates, a = 0))
+  y1 <- predict(lm_y1, newdata = transform(covariates, a = 1),  type = "response")
+  y0 <- predict(lm_y1, newdata = transform(covariates, a = 0),  type = "response")
   
   # Calculate and return the estimate
-  nid <- mean(y1 - y0)
+  nid.rd <- mean(y1 - y0); nid.rr <- mean(y1)/mean(y0); nid.or <- (mean(y1)/(1-mean(y1))) / (mean(y0)/(1-mean(y0)))
   # Return the estimate of the indirect effect
-  return(nid)
+  return(list(nid.rd = nid.rd, nid.rr = nid.rr, nid.or = nid.or))
 }
-gcomp.nie(dat_aug)
-
+nie_gcom <- gcomp.nie(dat_aug)
+nie_gcom
 
 # instantiate learners
 mean_lrnr <- Lrnr_mean$new()

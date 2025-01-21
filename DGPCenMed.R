@@ -54,11 +54,12 @@ Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, lod = NULL, censor_r
   
   # Generate the outcome of interest
   QY <- function(A, M, L1, L2, L3) {
-    0.5 + 2 * A + 0.5 * M + 0.25 * L1 - 0.5 * L2 -0.5 * L3
+    -1.25 + 2 * A + 0.5 * M - 0.25 * L1 - 0.5 * L2 -0.5 * L3
   }
   QY_obs <- QY(A, M_full, L1, L2, L3)
   Yprob <- plogis(QY_obs)  # Convert to probabilities using the logistic function
   Y <- rbinom(n_obs, 1, Yprob) 
+  summary(Y); hist(Y)
   
   # Create data frame and return
   study_dat <- data.table::setDT(
@@ -182,16 +183,16 @@ get_truth <- function(gen_data, random = FALSE, n_truth = 1e7) {
     psi_rr = ate_rr,
     psi_or = ate_rr,
     var_eif = var(eif_ate),
-    RD.nde = nde_rd,
-    RD.nie = nie_rd,
-    RR.nde = nde_rr,
-    RR.nie = nie_rr,
-    OR.nde = nde_or,
-    OR.nie = nie_or
+    nde_rd = nde_rd,
+    nde_rr = nde_rr,
+    nde_or = nde_or,
+    nie_rd = nie_rd,
+    nie_rr = nie_rr,
+    nie_or = nie_or
   ))
 }
 
 (truth <- get_truth(gen_data = Study_dgp_Mcensor))
-
+truth
 
 
