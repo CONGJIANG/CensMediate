@@ -1,11 +1,16 @@
+#remotes::install_github("nhejazi/medoutcon")
+#devtools::install_github("tlverse/tlverse")
 library(data.table) # Assuming 'data' is a data.table
 library(dplyr)
 library(sl3)
+library(hal9001)
 library(medoutcon)
+library(truncnorm)
 n_obs <- 5000
 
 (data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.3))
 (LOD <- data$lod)
+(LOD_value <- as.numeric(data$lod))
 
 head(data$study_dat)
 head(data$study_dat_full)
@@ -15,12 +20,37 @@ dataset
 
 
 
+
+NaiveImpute <- function(data, LOD = LOD_value) {
+  # Duplicate and impute LOD rows
+  imputed_rows_list <- lapply(1:nrow(data[data$M == "LOD", ]), function(i) {
+    replicated_row <- data[data$M == "LOD", ]
+    replicated_row$M <- LOD_value/2
+    return(replicated_row)
+  })
+  
+  # Combine non-LOD data with imputed LOD rows
+  data <- rbind(data[data$M != "LOD", ], do.call(rbind, imputed_rows_list))
+  # Convert all character columns to numeric or factor as needed
+  data <- data %>%
+    mutate(across(where(is.character), as.numeric))
+  # Ensure the outcome and weights are numeric
+  data$censored <- as.numeric(data$censored)
+  data$w_norm <- rep(1, nrow(data))
+  return(data)
+}
+
+NaiveImpute(dataset, LOD = LOD_value)
+
+###############################
+## Density of M below LOD
+##
 sample_truncated_proposal <- function(n, data, LOD, beta_m) {
   meanL <- as.matrix(data[c("L1", "L2", "L3")]) %*% beta_m[c("L1", "L2", "L3")]
   rtruncnorm(n, a = 0, b = LOD, mean = beta_m["A"] * data$A + meanL, sd = beta_m["sd"])
 }
 
-# Function to compute f(M)
+# Density Function to compute f(M)
 compute_f_M <- function(data, LOD, beta_m) {
   # Calculate the means for each data point
   meanL <- as.matrix(data[, .(L1, L2, L3)]) %*% beta_m[c("L1", "L2", "L3")]
@@ -37,8 +67,8 @@ compute_f_M <- function(data, LOD, beta_m) {
 ########################################
 beta_m <- c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)
 LOD_value <- as.numeric(data$lod)  # Set the LOD value
-library(truncnorm)
 
+########################################
 # Define the E-step
 Impute_step <- function(data, beta_m, S, LOD = LOD_value) {
   # Duplicate and impute LOD rows
@@ -69,7 +99,7 @@ Impute_step <- function(data, beta_m, S, LOD = LOD_value) {
 mod_update_glm <- function(data) {
   # Check and assign w_norm if NULL
   if (is.null(data$w_norm)) {data$w_norm <- 1}
-  # Censoring Modeling (non parametric assumption, include Y? )
+  # Censoring Modeling (parametric model, does not include Y)
   cen_mod <- glm(censored ~ L1 + L2 + L3 + A + M, data = data, family = binomial, weights = w_norm)
   cen_prob <- predict(cen_mod, type = "response")
   # Outcome Modeling
@@ -117,13 +147,13 @@ Wet_step <- function(data_imputed, mod_pred, beta_m_new, beta_m_0, LOD) {
 
 # Apply the updated function
 data_weted <- Wet_step(data_imputed, mod_pred, beta_m_new = beta_m, beta_m_0 = beta_m, LOD = LOD_value)
+data_weted
 
 
 
 
 
-
-
+########################################
 # Define the M-step
 M_stepf_M <- function(data, LOD = LOD_value, beta_m) {
   # Define an internal function for optimization
@@ -163,7 +193,7 @@ M_stepf_M(data = data_weted, LOD = LOD_value, beta_m)
 
 
 # EM Algorithm
-EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 1000, tol = 1e-16) {
+EM_algorithm <- function(data, beta_m_0, S = 50, LOD = LOD_value, max_iter = 1000, tol = 1e-16) {
   iter <- 0
   diff <- Inf
   # I-Step
@@ -182,7 +212,7 @@ EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 100
     diff <- sum((beta_m_new - beta_m)^2)
     cen_coef_old <- mod_pred$cen_coef
     out_coef_old <- mod_pred$out_coef
-
+    
     # parameter updating
     beta_m <- beta_m_new
     mod_pred <- mod_update_glm(data_weted)
@@ -200,9 +230,10 @@ EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 100
 beta_m <- c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)
 LOD_value <- as.numeric(data$lod)  # Set the LOD value
 # Run the EM algorithm
-dat_aug <- EM_algorithm(dataset, beta_m)
+dat_res <- EM_algorithm(dataset, beta_m)
 
-dat_aug <- dat_aug$data_weted
+dat_aug <- dat_res$data_weted
+dat_res$beta_m
 dim(dat_aug)
 head(dat_aug)
 
@@ -241,9 +272,40 @@ gcomp.nde <- function(data) {
 }
 
 
-nde_gcom <- gcomp.nde(dat_aug)
-nde_gcom
+nde_gcom_glm <- gcomp.nde(dat_aug)
+nde_gcom_glm$nde.rd
 
+# Perform bootstrap
+gcom_boots_ci <- function(data, n_bootstrap = 10, alpha = 0.05, type = c("NDE", "NIE")) {
+  n <- nrow(data)
+  boots_est <- numeric(n_bootstrap)
+  
+  set.seed(123)  # For reproducibility
+  for (i in seq_len(n_bootstrap)) {
+    # Resample data with replacement
+    bootstrap_sample <- data[sample(1:n, size = n, replace = TRUE), ]
+    # Calculate the point estimate for the bootstrap sample
+    if (type == "NDE") {
+      bres <- gcomp.nde(bootstrap_sample)
+      boots_est[i] <- bres$nde.rd  # Extract NDE estimate
+    } else if (type == "NIE") {
+      bres <- gcomp.nie(bootstrap_sample)
+      boots_est[i] <- bres$nie.rd  # Extract NIE estimate
+    }
+  }
+  
+  # Calculate the 95% CI using percentiles
+  ci_lower <- quantile(boots_est, probs = alpha / 2)
+  ci_upper <- quantile(boots_est, probs = 1 - alpha / 2)
+  
+  list(
+    point_estimate = mean(boots_est),  # Mean of bootstrap estimates
+    ci = c(ci_lower, ci_upper)  # Confidence interval
+  )
+}
+
+# Example usage with your dataset
+(res1 <- gcom_boots_ci(dat_aug, type = "NDE"))
 
 
 gcomp.nie <- function(data) {
@@ -272,90 +334,162 @@ gcomp.nie <- function(data) {
   y0 <- predict(lm_y1, newdata = transform(covariates, a = 0),  type = "response")
   
   # Calculate and return the estimate
-  nid.rd <- mean(y1 - y0); nid.rr <- mean(y1)/mean(y0); nid.or <- (mean(y1)/(1-mean(y1))) / (mean(y0)/(1-mean(y0)))
+  nie.rd <- mean(y1 - y0); nie.rr <- mean(y1)/mean(y0); nie.or <- (mean(y1)/(1-mean(y1))) / (mean(y0)/(1-mean(y0)))
   # Return the estimate of the indirect effect
-  return(list(nid.rd = nid.rd, nid.rr = nid.rr, nid.or = nid.or))
+  return(list(nie.rd = nie.rd, nie.rr = nie.rr, nie.or = nie.or))
 }
-nie_gcom <- gcomp.nie(dat_aug)
-nie_gcom
+nie_gcom_glm <- gcomp.nie(dat_aug)
+nie_gcom_glm
+(res2 <- gcom_boots_ci(dat_aug, type = "NIE")$ci)
 
-# instantiate learners
-mean_lrnr <- Lrnr_mean$new()
-fglm_lrnr <- Lrnr_glm_fast$new()
-lasso_lrnr <- Lrnr_glmnet$new(alpha = 1, nfolds = 3)
-rf_lrnr <- Lrnr_ranger$new(num.trees = 200)
+est_med_effs <- function(dat_aug) {
+  # Load necessary libraries
+  library(sl3)
+  library(tlverse)
+  
+  # Instantiate learners
+  mean_lrnr <- Lrnr_mean$new()
+  fglm_lrnr <- Lrnr_glm_fast$new()
+  lasso_lrnr <- Lrnr_glmnet$new(alpha = 1, nfolds = 3)
+  rf_lrnr <- Lrnr_ranger$new(num.trees = 200)
+  
+  # Create learner library and instantiate super learner ensemble
+  lrnr_lib <- Stack$new(mean_lrnr, fglm_lrnr, lasso_lrnr, rf_lrnr)
+  sl_lrnr <- Lrnr_sl$new(learners = lrnr_lib, metalearner = Lrnr_nnls$new())
+  
+  # Define a helper function to extract summary results as a vector
+  extract_summary <- function(result) {
+    summary_data <- summary(result)
+    return(unlist(summary_data)) # Flatten to a vector
+  }
+  
+  # Compute one-step and TMLE estimates for NDE and NIE
+  nde_onestep_glm <- medoutcon(
+    W = dat_aug[, c("L1", "L2", "L3")],
+    A = as.numeric(dat_aug$A),
+    Z = NULL,
+    M = dat_aug$M,
+    Y = dat_aug$Y,
+    obs_weights = dat_aug$w_norm,
+    g_learners = lasso_lrnr,
+    h_learners = lasso_lrnr,
+    b_learners = lasso_lrnr,
+    effect = "direct",
+    estimator = "onestep",
+    estimator_args = list(cv_folds = 5)
+  )
+  
+  nde_tmle_glm <- medoutcon(
+    W = dat_aug[, c("L1", "L2", "L3")],
+    A = as.numeric(dat_aug$A),
+    Z = NULL,
+    M = dat_aug$M,
+    Y = dat_aug$Y,
+    obs_weights = dat_aug$w_norm,
+    g_learners = lasso_lrnr,
+    h_learners = lasso_lrnr,
+    b_learners = lasso_lrnr,
+    effect = "direct",
+    estimator = "tmle",
+    estimator_args = list(cv_folds = 5)
+  )
+  
+  nie_onestep_glm <- medoutcon(
+    W = dat_aug[, c("L1", "L2", "L3")],
+    A = as.numeric(dat_aug$A),
+    Z = NULL,
+    M = dat_aug$M,
+    Y = dat_aug$Y,
+    obs_weights = dat_aug$w_norm,
+    g_learners = lasso_lrnr,
+    h_learners = lasso_lrnr,
+    b_learners = lasso_lrnr,
+    effect = "indirect",
+    estimator = "onestep",
+    estimator_args = list(cv_folds = 5)
+  )
+  
+  nie_tmle_glm <- medoutcon(
+    W = dat_aug[, c("L1", "L2", "L3")],
+    A = as.numeric(dat_aug$A),
+    Z = NULL,
+    M = dat_aug$M,
+    Y = dat_aug$Y,
+    obs_weights = dat_aug$w_norm,
+    g_learners = lasso_lrnr,
+    h_learners = lasso_lrnr,
+    b_learners = lasso_lrnr,
+    effect = "indirect",
+    estimator = "tmle",
+    estimator_args = list(cv_folds = 5)
+  )
+  
+  nde_onestep <- summary(nde_onestep_glm)
+  nde_tmle <- summary(nde_tmle_glm)
+  nie_onestep <- summary(nie_onestep_glm)
+  nie_tmle <- summary(nie_tmle_glm)
+  
+  # Return the summaries as a named list
+  return(list(
+    nde_onestep_est = nde_onestep$param_est,
+    nde_onestep_ci = c(nde_onestep$lwr_ci, nde_onestep$upr_ci),
+    nde_tmle_est = nde_tmle$param_est,
+    nde_tmle_ci = c(nde_tmle$lwr_ci, nde_tmle$upr_ci),
+    nie_onestep_est = nie_onestep$param_est,
+    nie_onestep_ci = c(nie_onestep$lwr_ci, nie_onestep$upr_ci),
+    nie_tmle_est = nie_tmle$param_est,
+    nie_tmle_ci = c(nie_tmle$lwr_ci, nie_tmle$upr_ci)
+  ))
+}
 
-# create learner library and instantiate super learner ensemble
-lrnr_lib <- Stack$new(mean_lrnr, fglm_lrnr, lasso_lrnr, rf_lrnr)
-sl_lrnr <- Lrnr_sl$new(learners = lrnr_lib, metalearner = Lrnr_nnls$new())
+(medeff <- est_med_effs(dat_aug))
+str(medeff)
+str(medeff$nde_onestep_glm)
 
 
-# compute one-step estimate of the natural direct effect
-nde_onestep <- medoutcon(
-  W = dat_aug[, c("L1", "L2", "L3")],
-  A = as.numeric(dat_aug$A),
-  Z = NULL,
-  M = dat_aug$M,
-  Y = dat_aug$Y,
-  obs_weights = dat_aug$w_norm,
-  g_learners = lasso_lrnr,
-  h_learners = lasso_lrnr,
-  b_learners = lasso_lrnr,
-  effect = "direct",
-  estimator = "onestep",
-  estimator_args = list(cv_folds = 5)
-)
-summary(nde_onestep)
+MC_sim <- function(r, n_obs, type = c("Trad", "EM-MLE"), censor_rate = 0.3, beta_m = c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)) {
+  output_file <- paste0("MED", "JAN", type, "n_", n_obs, ".txt")
+  
+  for (i in 1:r) {
+    # Generate data
+    data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = censor_rate)
+    LOD_value <- as.numeric(data$lod)
+    dataset <- data$study_dat
+    
+    if (type == "Trad") {
+      dat_aug <- NaiveImpute(dataset, LOD_value)
+    } else if (type == "EM-MLE") {
+      # Run the EM algorithm
+      em_result <- EM_algorithm(dataset, beta_m)
+      dat_aug <- em_result$data_weted
+      #Using updated beta_m
+      beta_m <- em_result$beta_m
+    }
+    
+    # G-computation estimates
+    nde_gcom_glm <- gcomp.nde(dat_aug)
+    CI.nde <- gcom_boots_ci(dat_aug, type = "NDE")$ci
+    nie_gcom_glm <- gcomp.nie(dat_aug)
+    CI.nie <- gcom_boots_ci(dat_aug, type = "NIE")$ci
+    
+    # Estimation using the custom mediation function
+    med_effects <- est_med_effs(dat_aug)
+    
+    # Save results
+    write(
+      c(i, nde_gcom_glm$nde.rd, CI.nde, nie_gcom_glm$nid.rd, CI.nie, medeff$nde_onestep_est, medeff$nde_onestep_ci,
+        medeff$nde_tmle_est, medeff$nde_tmle_ci, medeff$nie_onestep_est, medeff$nie_onestep_ci, medeff$nie_tmle_est, medeff$nie_tmle_ci),
+      file = output_file,
+      ncolumns = 50,
+      append = TRUE
+    )
+  }
+}
+
+# Example usage
+r <- 2   # Number of replicates
+n_obs <- 500  # Number of observations per replicate
+
+sim.res <- MC_sim(r = r, type = "Trad", n_obs = n_obs)
 
 
-# compute tmle estimate of the natural direct effect
-nde_tmle <- medoutcon(
-  W = dat_aug[, c("L1", "L2", "L3")],
-  A = as.numeric(dat_aug$A),
-  Z = NULL,
-  M = dat_aug$M,
-  Y = dat_aug$Y,
-  obs_weights = dat_aug$w_norm,
-  g_learners = lasso_lrnr,
-  h_learners = lasso_lrnr,
-  b_learners = lasso_lrnr,
-  effect = "direct",
-  estimator = "tmle",
-  estimator_args = list(cv_folds = 5)
-)
-summary(nde_tmle)
-
-
-# compute one-step estimate of the natural indirect effect
-nie_onestep <- medoutcon(
-  W = dat_aug[, c("L1", "L2", "L3")],
-  A = as.numeric(dat_aug$A),
-  Z = NULL,
-  M = dat_aug$M,
-  Y = dat_aug$Y,
-  obs_weights = dat_aug$w_norm,
-  g_learners = lasso_lrnr,
-  h_learners = lasso_lrnr,
-  b_learners = lasso_lrnr,
-  effect = "indirect",
-  estimator = "onestep",
-  estimator_args = list(cv_folds = 5)
-)
-summary(nie_onestep)
-
-
-nie_tmle <- medoutcon(
-  W = dat_aug[, c("L1", "L2", "L3")],
-  A = as.numeric(dat_aug$A),
-  Z = NULL,
-  M = dat_aug$M,
-  Y = dat_aug$Y,
-  obs_weights = dat_aug$w_norm,
-  g_learners = lasso_lrnr,
-  h_learners = lasso_lrnr,
-  b_learners = lasso_lrnr,
-  effect = "indirect",
-  estimator = "tmle",
-  estimator_args = list(cv_folds = 5)
-)
-summary(nie_tmle)

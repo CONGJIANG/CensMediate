@@ -1,7 +1,13 @@
 library(data.table) # Assuming 'data' is a data.table
-n_obs <- 10
-(data <- Study_dgp_Mcensor(n_obs = n_obs, lod = 1.0))
-sum(data$study_dat$censored)/n_obs *100
+library(dplyr)
+library(sl3)
+library(hal9001)
+library(medoutcon)
+library(truncnorm)
+n_obs <- 5000
+
+(data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.3))
+(LOD <- data$lod)
 
 head(data$study_dat)
 head(data$study_dat_full)
@@ -16,7 +22,7 @@ sample_truncated_proposal <- function(n, data, LOD, beta_m) {
   rtruncnorm(n, a = 0, b = LOD, mean = beta_m["A"] * data$A + meanL, sd = beta_m["sd"])
 }
 
-# Function to compute f(M)
+# Density Function to compute f(M)
 compute_f_M <- function(data, LOD, beta_m) {
   # Calculate the means for each data point
   meanL <- as.matrix(data[, .(L1, L2, L3)]) %*% beta_m[c("L1", "L2", "L3")]
@@ -32,9 +38,8 @@ compute_f_M <- function(data, LOD, beta_m) {
 
 ########################################
 beta_m <- c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)
-LOD_value <- 1.0  # Set the LOD value
-library(truncnorm)
-
+LOD_value <- as.numeric(data$lod)  # Set the LOD value
+########################################
 # Define the E-step
 Impute_step <- function(data, beta_m, S, LOD = LOD_value) {
   # Duplicate and impute LOD rows
@@ -144,7 +149,7 @@ data_weted <- Wet_step(data_imputed, mod_pred, beta_m_new = beta_m, beta_m_0 = b
 
 
 
-
+########################################
 # Define the M-step
 M_stepf_M <- function(data, LOD = LOD_value, beta_m) {
   # Define an internal function for optimization
@@ -184,12 +189,14 @@ M_stepf_M(data = data_weted, LOD = LOD_value, beta_m)
 
 
 # EM Algorithm
-EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 1000, tol = 1e-26) {
+EM_algorithm <- function(data, beta_m_0, S = 50, LOD = LOD_value, max_iter = 1000, tol = 1e-16) {
   iter <- 0
   diff <- Inf
   # I-Step
   data_imputed <- Impute_step(data, beta_m_0, S)
   mod_pred <- mod_update_hal(data_imputed)
+  beta_m <- beta_m_0
+  
   while (iter < max_iter && diff > tol) {
     # W-Step
     data_weted <- Wet_step(data_imputed, mod_pred, beta_m_new = beta_m, beta_m_0 = beta_m, LOD = LOD_value)
@@ -199,10 +206,14 @@ EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 100
     
     # Calculate convergence criteria
     diff <- sum((beta_m_new - beta_m)^2)
+    cen_coef_old <- mod_pred$cen_coef
+    out_coef_old <- mod_pred$out_coef
     
     # parameter updating
     beta_m <- beta_m_new
     mod_pred <- mod_update_hal(data_weted)
+    
+    diff <- diff + sum((mod_pred$cen_coef - cen_coef_old)^2) + sum((mod_pred$out_coef - out_coef_old)^2)
     iter <- iter + 1
     cat("Iteration:", iter, "Difference:", diff, "\n")
   }
@@ -213,7 +224,171 @@ EM_algorithm <- function(data, beta_m_0, S = 20, LOD = LOD_value, max_iter = 100
 
 # Define initial guesses for beta_m parameters
 beta_m <- c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)
-LOD_value <- 1.0  # Set the LOD value
+LOD_value <- as.numeric(data$lod)  # Set the LOD value
 # Run the EM algorithm
-EM_algorithm(dataset, beta_m)
+dat_aug <- EM_algorithm(dataset, beta_m)
 
+dat_aug <- dat_aug$data_weted
+dim(dat_aug)
+head(dat_aug)
+
+
+gcomp.nde <- function(data) {
+  # Extract variables from the dataset
+  y <- data$Y        # Assuming Y is the outcome variable
+  m <- data$M        # Assuming M is the mediator
+  a <- data$A        # Assuming A is the treatment
+  l1 <- data$L1      # Assuming L1 is the first covariate
+  l2 <- data$L2      # Assuming L2 is the second covariate
+  l3 <- data$L3      # Assuming L3 is the third covariate
+  weights <- data$w_norm  # Extract the weights
+  
+  # Combine L1, L2, L3 into a data frame for modeling convenience
+  covariates <- data.frame(l1 = l1, l2 = l2, l3 = l3)
+  
+  # Fit a weighted linear model for y including m, a, and covariates
+  lm_y <- glm(y ~ m + a + l1 + l2 + l3, weights = weights, family = binomial)
+  
+  # Predict potential outcomes under different treatments
+  pred_y1 <- predict(lm_y, newdata = transform(covariates, a = 1, m = m), type = "response")
+  pred_y0 <- predict(lm_y, newdata = transform(covariates, a = 0, m = m), type = "response")
+  
+  # Fit a weighted linear model using the pseudo outcome
+  lm_y1 <- glm(pred_y1 ~ a + l1 + l2 + l3, weights = weights, family = binomial)
+  lm_y0 <- glm(pred_y0 ~ a + l1 + l2 + l3, weights = weights, family = binomial)
+  
+  # Predict the causal effect when a = 0
+  y1 <- predict(lm_y1, newdata = transform(covariates, a = 0), type = "response")
+  y0 <- predict(lm_y0, newdata = transform(covariates, a = 0), type = "response")
+  
+  # Calculate and return the estimate
+  nde.rd <- mean(y1 - y0); nde.rr <- mean(y1)/mean(y0); nde.or <- (mean(y1)/(1-mean(y1))) / (mean(y0)/(1-mean(y0)))
+  return(list(nde.rd = nde.rd, nde.rr = nde.rr, nde.or = nde.or))
+}
+
+
+nde_gcom <- gcomp.nde(dat_aug)
+nde_gcom
+
+
+
+gcomp.nie <- function(data) {
+  # Extract variables from the dataset
+  y <- data$Y        # Outcome variable
+  m <- data$M        # Mediator
+  a <- data$A        # Treatment
+  l1 <- data$L1      # Covariate 1
+  l2 <- data$L2      # Covariate 2
+  l3 <- data$L3      # Covariate 3
+  weights <- data$w_norm  # Weights for weighted regression
+  
+  # Combine covariates into a data frame for modeling convenience
+  covariates <- data.frame(l1 = l1, l2 = l2, l3 = l3)
+  
+  # Fit a weighted linear model for y including m, a, and covariates
+  lm_y <- glm(y ~ m + a + l1 + l2 + l3, weights = weights, family = binomial)
+  
+  # Predict potential outcomes under different treatments
+  pred_y1 <- predict(lm_y, newdata = transform(covariates, a = 1, m = m),  type = "response")
+  # Fit a weighted linear model using the predict potential outcomes
+  lm_y1 <- glm(pred_y1 ~ a + l1 + l2 + l3, weights = weights,  family = binomial)
+  
+  # Predict the causal effect when a = 0
+  y1 <- predict(lm_y1, newdata = transform(covariates, a = 1),  type = "response")
+  y0 <- predict(lm_y1, newdata = transform(covariates, a = 0),  type = "response")
+  
+  # Calculate and return the estimate
+  nid.rd <- mean(y1 - y0); nid.rr <- mean(y1)/mean(y0); nid.or <- (mean(y1)/(1-mean(y1))) / (mean(y0)/(1-mean(y0)))
+  # Return the estimate of the indirect effect
+  return(list(nid.rd = nid.rd, nid.rr = nid.rr, nid.or = nid.or))
+}
+nie_gcom <- gcomp.nie(dat_aug)
+nie_gcom
+
+# instantiate learners
+mean_lrnr <- Lrnr_mean$new()
+fglm_lrnr <- Lrnr_glm_fast$new()
+lasso_lrnr <- Lrnr_glmnet$new(alpha = 1, nfolds = 3)
+rf_lrnr <- Lrnr_ranger$new(num.trees = 200)
+
+# create learner library and instantiate super learner ensemble
+lrnr_lib <- Stack$new(mean_lrnr, fglm_lrnr, lasso_lrnr, rf_lrnr)
+sl_lrnr <- Lrnr_sl$new(learners = lrnr_lib, metalearner = Lrnr_nnls$new())
+
+
+# compute one-step estimate of the natural direct effect
+nde_onestep <- medoutcon(
+  W = dat_aug[, c("L1", "L2", "L3")],
+  A = as.numeric(dat_aug$A),
+  Z = NULL,
+  M = dat_aug$M,
+  Y = dat_aug$Y,
+  obs_weights = dat_aug$w_norm,
+  g_learners = lasso_lrnr,
+  h_learners = lasso_lrnr,
+  b_learners = lasso_lrnr,
+  effect = "direct",
+  estimator = "onestep",
+  estimator_args = list(cv_folds = 5)
+)
+summary(nde_onestep)
+
+
+# compute tmle estimate of the natural direct effect
+nde_tmle <- medoutcon(
+  W = dat_aug[, c("L1", "L2", "L3")],
+  A = as.numeric(dat_aug$A),
+  Z = NULL,
+  M = dat_aug$M,
+  Y = dat_aug$Y,
+  obs_weights = dat_aug$w_norm,
+  g_learners = lasso_lrnr,
+  h_learners = lasso_lrnr,
+  b_learners = lasso_lrnr,
+  effect = "direct",
+  estimator = "tmle",
+  estimator_args = list(cv_folds = 5)
+)
+summary(nde_onestep)
+summary(nde_tmle)
+
+
+# compute one-step estimate of the natural indirect effect
+nie_onestep <- medoutcon(
+  W = dat_aug[, c("L1", "L2", "L3")],
+  A = as.numeric(dat_aug$A),
+  Z = NULL,
+  M = dat_aug$M,
+  Y = dat_aug$Y,
+  obs_weights = dat_aug$w_norm,
+  g_learners = lasso_lrnr,
+  h_learners = lasso_lrnr,
+  b_learners = lasso_lrnr,
+  effect = "indirect",
+  estimator = "onestep",
+  estimator_args = list(cv_folds = 5)
+)
+summary(nie_onestep)
+
+
+nie_tmle <- medoutcon(
+  W = dat_aug[, c("L1", "L2", "L3")],
+  A = as.numeric(dat_aug$A),
+  Z = NULL,
+  M = dat_aug$M,
+  Y = dat_aug$Y,
+  obs_weights = dat_aug$w_norm,
+  g_learners = lasso_lrnr,
+  h_learners = lasso_lrnr,
+  b_learners = lasso_lrnr,
+  effect = "indirect",
+  estimator = "tmle",
+  estimator_args = list(cv_folds = 5)
+)
+
+nde_gcom
+nie_gcom
+summary(nde_onestep)
+summary(nde_tmle)
+summary(nie_onestep)
+summary(nie_tmle)
