@@ -4,6 +4,7 @@ library(sl3)
 library(hal9001)
 library(medoutcon)
 library(truncnorm)
+library(origami)
 n_obs <- 5000
 
 (data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.3))
@@ -109,8 +110,110 @@ mod_update_hal <- function(data) {
   ))
 }
 
-mod_pred <- mod_update_hal(data_imputed)
+system.time({ mod_pred <- mod_update_hal(data_imputed) })
 mod_pred$cen_coef
+
+
+mod_update_halcv <- function(data, L1_seq = seq(0.2, 2000, length.out = 2), 
+                           lambda_seq = exp(seq(-0.5, -20, length = 2)), 
+                           basis_list = NULL) {
+  # Check and assign w_norm if NULL (for the initial value of the weights)
+  if (is.null(data$w_norm)) { data$w_norm <- 1 }
+  
+  # Joint cross-validated HAL fitting for censoring and outcome models
+  fit_cv_hal_joint <- function(data, X, Y_cen, Y_out, weights, L1_seq, lambda_seq, basis_list) {
+    # Define the HAL model for both outcomes
+    fit_cv_hal <- function(lambda_seq, basis_list) {
+      # Fit HAL for censoring model
+      cen_mod <- fit_hal(
+        X = X, Y = Y_cen, family = "binomial", 
+        lambda = lambda_seq, weights = weights, 
+        max_degree = 3, reduce_basis = 1 / sqrt(nrow(X)), smoothness_orders = 0,
+        basis_list = basis_list
+      )
+      # Fit HAL for outcome model
+      out_mod <- fit_hal(
+        X = X, Y = Y_out, family = "binomial", 
+        lambda = lambda_seq, weights = weights, 
+        max_degree = 3, reduce_basis = 1 / sqrt(nrow(X)), smoothness_orders = 0,
+        basis_list = basis_list
+      )
+      # Extract negative log-likelihoods for both models
+      cen_nll <- -sum(log(predict(cen_mod, new_data = X, type = "response")[Y_cen == 1])) -
+        sum(log(1 - predict(cen_mod, new_data = X, type = "response")[Y_cen == 0]))
+      out_nll <- -sum(log(predict(out_mod, new_data = X, type = "response")[Y_out == 1])) -
+        sum(log(1 - predict(out_mod, new_data = X, type = "response")[Y_out == 0]))
+      list(
+        cen_mod = cen_mod,
+        out_mod = out_mod,
+        joint_loss = cen_nll + out_nll,  # Joint negative log-likelihood
+        cen_coef = coef(cen_mod),
+        out_coef = coef(out_mod),
+        cen_prob = predict(cen_mod, new_data = X, type = "response"),
+        out_prob = predict(out_mod, new_data = X, type = "response"),
+        cen_basis_list = cen_mod$basis_list,
+        out_basis_list = out_mod$basis_list
+      )
+    }
+    
+    # Perform initial HAL fit to discover basis functions
+    if (is.null(basis_list)) {
+      initial_fit <- fit_cv_hal(lambda_seq = lambda_seq, basis_list = NULL)
+      basis_list <- initial_fit$cen_basis_list  # Use censoring model's basis list as reference
+    }
+    
+    # Evaluate models across lambda sequence using shared basis_list
+    results <- lapply(lambda_seq, function(lambda) fit_cv_hal(lambda_seq = lambda_seq, basis_list = basis_list))
+    joint_losses <- sapply(results, function(res) res$joint_loss)
+    best_lambda_idx <- which.min(joint_losses)  # Find best lambda index
+    best_result <- results[[best_lambda_idx]]  # Get best result
+    best_lambda <- lambda_seq[best_lambda_idx]  # Get best lambda value
+    
+    return(list(
+      cen_mod = best_result$cen_mod,
+      out_mod = best_result$out_mod,
+      cen_prob = best_result$cen_prob,
+      out_prob = best_result$out_prob,
+      cen_coef = best_result$cen_coef,
+      out_coef = best_result$out_coef,
+      best_lambda = best_lambda,
+      basis_list = basis_list  # Return shared basis list
+    ))
+  }
+  
+  # Define covariates and outcomes
+  X <- as.matrix(data[, c("L1", "L2", "L3", "A", "M")])
+  Y_cen <- data$censored
+  Y_out <- data$Y
+  weights <- data$w_norm
+  
+  # Perform joint cross-validated HAL fitting
+  joint_result <- fit_cv_hal_joint(data, X, Y_cen, Y_out, weights, L1_seq, lambda_seq, basis_list)
+  
+  # Return predictions, coefficients, and optimal lambda
+  return(list(
+    cen_prob = joint_result$cen_prob,
+    out_prob = joint_result$out_prob,
+    cen_coef = joint_result$cen_coef,
+    out_coef = joint_result$out_coef,
+    best_lambda = joint_result$best_lambda,
+    basis_list = joint_result$basis_list
+  ))
+}
+
+
+
+
+
+
+# Run the updated HAL fitting function
+system.time({ cv_halmod_pred <- mod_update_halcv(data_imputed)})
+# Access results
+cv_halmod_pred$cen_prob     # Predicted probabilities for the censoring model
+cv_halmod_pred$out_prob     # Predicted probabilities for the outcome model
+cv_halmod_pred$best_lambda  # Optimal lambda selected
+cv_halmod_pred$basis_list   # Shared basis functions
+
 
 # mod_pred are from mod_update_hal funciton, which inlucdes both out_prob and cen_prob
 Wet_step <- function(data_imputed, mod_pred, beta_m_new, beta_m_0, LOD) {
