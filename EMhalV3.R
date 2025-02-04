@@ -117,125 +117,17 @@ system.time({ mod_pred <- mod_update_hal(data_imputed) })
 mod_pred$cen_coef
 
 
-mod_update_halcv <- function(data, lambda_seq = exp(seq(-0.5, -20, length = 1000)), 
-                             basis_list = NULL) {
-  # Check and assign w_norm if NULL (for the initial value of the weights)
-  if (is.null(data$w_norm)) { data$w_norm <- 1 }
-  
-  # Joint cross-validated HAL fitting for censoring and outcome models
-  fit_cv_hal_joint <- function(data, X, Y_cen, Y_out, weights, lambda_seq, basis_list) {
-    # Define the HAL model for both outcomes
-    fit_cv_hal <- function(lambda_seq, basis_list) {
-      # Fit HAL for censoring model
-      cen_mod <- fit_hal(
-        X = X, Y = Y_cen, family = "binomial", 
-        lambda = lambda_seq, weights = weights, 
-        max_degree = 2, reduce_basis = 1 / sqrt(nrow(X)), smoothness_orders = 0,
-        basis_list = basis_list
-      )
-      # Fit HAL for outcome model
-      out_mod <- fit_hal(
-        X = X, Y = Y_out, family = "binomial", 
-        lambda = lambda_seq, weights = weights, 
-        max_degree = 2, reduce_basis = 1 / sqrt(nrow(X)), smoothness_orders = 0,
-        basis_list = basis_list
-      )
-      # Extract negative log-likelihoods for both models
-      cen_nll <- -sum(log(predict(cen_mod, new_data = X, type = "response")[Y_cen == 1])) -
-        sum(log(1 - predict(cen_mod, new_data = X, type = "response")[Y_cen == 0]))
-      out_nll <- -sum(log(predict(out_mod, new_data = X, type = "response")[Y_out == 1])) -
-        sum(log(1 - predict(out_mod, new_data = X, type = "response")[Y_out == 0]))
-      list(
-        cen_mod = cen_mod,
-        out_mod = out_mod,
-        joint_loss = cen_nll + out_nll,  # Joint negative log-likelihood
-        cen_coef = coef(cen_mod),
-        out_coef = coef(out_mod),
-        cen_prob = predict(cen_mod, new_data = X, type = "response"),
-        out_prob = predict(out_mod, new_data = X, type = "response"),
-        cen_basis_list = cen_mod$basis_list,
-        out_basis_list = out_mod$basis_list
-      )
-    }
-    
-    # Perform initial HAL fit to discover basis functions
-    if (is.null(basis_list)) {
-      initial_fit <- fit_cv_hal(lambda_seq = lambda_seq, basis_list = NULL)
-      basis_list <- initial_fit$cen_basis_list  # Use censoring model's basis list as reference
-    }
-    
-    # Evaluate models across lambda sequence using shared basis_list
-    results <- lapply(lambda_seq, function(lambda) fit_cv_hal(lambda_seq = lambda_seq, basis_list = basis_list))
-    joint_losses <- sapply(results, function(res) res$joint_loss)
-    best_lambda_idx <- which.min(joint_losses)  # Find best lambda index
-    best_result <- results[[best_lambda_idx]]  # Get best result
-    best_lambda <- lambda_seq[best_lambda_idx]  # Get best lambda value
-    
-    return(list(
-      cen_mod = best_result$cen_mod,
-      out_mod = best_result$out_mod,
-      cen_prob = best_result$cen_prob,
-      out_prob = best_result$out_prob,
-      cen_coef = best_result$cen_coef,
-      out_coef = best_result$out_coef,
-      best_lambda = best_lambda,
-      basis_list = basis_list  # Return shared basis list
-    ))
-  }
-  
-  # Define covariates and outcomes
-  X <- as.matrix(data[, c("L1", "L2", "L3", "A", "M")])
-  Y_cen <- data$censored
-  Y_out <- data$Y
-  weights <- data$w_norm
-  
-  # Perform joint cross-validated HAL fitting
-  joint_result <- fit_cv_hal_joint(data, X, Y_cen, Y_out, weights, lambda_seq, basis_list)
-  
-  # Return predictions, coefficients, and optimal lambda
-  return(list(
-    cen_prob = joint_result$cen_prob,
-    out_prob = joint_result$out_prob,
-    cen_coef = joint_result$cen_coef,
-    out_coef = joint_result$out_coef,
-    best_lambda = joint_result$best_lambda,
-    basis_list = joint_result$basis_list
-  ))
-}
-
-
-
-
-
-
-# Run the updated HAL fitting function
-system.time({ cv_halmod_pred <- mod_update_halcv(data_imputed)})
-# Access results
-cv_halmod_pred$cen_prob     # Predicted probabilities for the censoring model
-cv_halmod_pred$out_prob     # Predicted probabilities for the outcome model
-cv_halmod_pred$best_lambda  # Optimal lambda selected
-cv_halmod_pred$basis_list   # Shared basis functions
-
-
 #############
 # METHOD 2
-
-data = data_imputed
-fold = 1
-k_folds = 10
-lambda_seq1 = exp(seq(-0.5, -20, length = 20))
-lambda_seq2 = exp(seq(-0.5, -20, length = 20))
-basis_list = NULL
-
-
-cv_hal_joint <- function(fold, data_in, x_names, y_cen_names, y_out_names, weights_names,
+cv_hal_joint <- function(data_in, fold, x_names, y_cen_names, y_out_names, weights_names,
                          lambda_seq1 = exp(seq(-0.5, -20, length = 1e4)), 
                          lambda_seq2 = exp(seq(-0.5, -20, length = 1e4)), 
                          basis_list = NULL) {
   
   ## 0) cross-validation via origami
-  train_data <- origami::training(data_in)
-  valid_data <- origami::validation(data_in)
+  train_data <- origami::training(data_in, fold)
+  valid_data <- origami::validation(data_in, fold)
+  
   x_train <- as.matrix(train_data[, ..x_names])
   y_cen_train <- as.numeric(train_data[, get(y_cen_names)])
   y_out_train <- as.numeric(train_data[, get(y_out_names)])
@@ -259,37 +151,43 @@ cv_hal_joint <- function(fold, data_in, x_names, y_cen_names, y_out_names, weigh
   out_mod <- hal9001::fit_hal(
     X = x_train, Y = y_out_train, weights = weights_train, family = "binomial", 
     lambda = lambda_seq2,
-    max_degree = 2, reduce_basis = 2 / sqrt(nrow(X_train)), smoothness_orders = 0,
+    max_degree = 2, reduce_basis = 2 / sqrt(nrow(x_train)), smoothness_orders = 0,
     basis_list = basis_list, fit_control = list(cv_select = FALSE),
     return_x_basis = TRUE
   )
-  
-  # Compute negative log-likelihood on validation set
+  # get coefficients
+  coef_mat_cen <- rbind(cen_mod$glmnet_lasso$a0, cen_mod$glmnet_lasso$beta) #     cen_coef = coef(cen_mod)
+  coef_mat_out <- rbind(out_mod$glmnet_lasso$a0, out_mod$glmnet_lasso$beta) #     out_coef = coef(out_mod)
   
   ## 2) predictions on validation data for each value of lambda
   valid_x_basis <- hal9001::make_design_matrix(x_valid, cen_mod$basis_list)
   valid_x_basis_clean <- valid_x_basis[, as.numeric(names(cen_mod$copy_map))]
   pred_mat <- cbind(rep(1, nrow(x_valid)), valid_x_basis_clean)
   
-  ?? preds_valid <- as.matrix(pred_mat %*% coef_mat)
-  
-  
-  cen_prob_val <- predict(cen_mod, new_data = X_val, type = "response")
-  out_prob_val <- predict(out_mod, new_data = X_val, type = "response")
+  #preds_valid <- as.matrix(pred_mat %*% coef_mat)
+  hat_valid_cen <- as.matrix(pred_mat %*% coef_mat_cen)
+  hat_valid_cen <- apply(hat_valid_cen, 2, stats::plogis)
+  hat_valid_out <- as.matrix(pred_mat %*% coef_mat_out)
+  hat_valid_out <- apply(hat_valid_out, 2, stats::plogis)
+  # OR ??? 
+  #hat_valid_cen <- predict(cen_mod, new_data = x_val, type = "response")
+  #hat_valid_out <- predict(out_mod, new_data = x_val, type = "response")
   
   return(list(
-    joint_loss_val = cen_nll_val + out_nll_val,
     cen_mod = cen_mod,
     out_mod = out_mod,
     cen_coef = coef(cen_mod),
-    out_coef = coef(out_mod)
+    out_coef = coef(out_mod),
+    hat_valid_cen = hat_valid_cen,
+    hat_valid_out = hat_valid_out
   ))
 }
 
 
 fit_cv_hal_joint <- function(data_in, folds, 
                              x_names, y_cen_names, y_out_names, weights_names, 
-                             lambda_seq1, lambda_seq2) {
+                             lambda_seq1, lambda_seq2,
+                             basis_list = NULL) {
   # fit enumerate_basis on full data to get set of basis functions
   if (is.null(basis_list)) {
     basis_list <- hal9001::enumerate_basis(as.matrix(data_in[, ..x_names]), max_degree = 3, smoothness_orders = 0)
@@ -299,12 +197,11 @@ fit_cv_hal_joint <- function(data_in, folds,
   # NOTE: use set of basis functions discovered in initial enumerate_basis
   cv_fit_hal_joint <- origami::cross_validate(
     cv_fun = cv_hal_joint,
-    folds = folds[-1],
+    folds = folds,
     data = data_in,
-    x_names, y_cen_names, y_out_names, weights_names,
-    lambda_seq1 = lambda_seq1, 
-    lambda_seq2 = lambda_seq2, 
-    basis_list = basis_list,
+    arglist = list(x_names = x_names, y_cen_names = y_cen_names, y_out_names = y_out_names, 
+                   weights_names = weights_names, lambda_seq1 = lambda_seq1, lambda_seq2 = lambda_seq2, 
+                   basis_list = basis_list),
     use_future = FALSE,
     .combine = FALSE
   )
@@ -312,24 +209,18 @@ fit_cv_hal_joint <- function(data_in, folds,
   # Extract validation indices from folds
   idx_folds <- do.call(c, lapply(folds, `[[`, "validation_set"))
   
-  # Combine predictions across folds for both Cen and Out model
-  cen_cv <- do.call(rbind, c(list(gn_cv_fit_hal_initial$hat_valid),
-                             cv_fit_hal_joint$hat_valid_cen))[idx_folds, ]
-  
-  # Combine predictions across folds for outcome model
-  out_cv <- do.call(rbind, c(list(qn_cv_fit_hal_initial$hat_valid),
-                             cv_fit_hal_joint$hat_valid_out))[idx_folds, ]
+  # Combine predictions
+  cen_cv <- do.call(rbind, cv_fit_hal_joint$hat_valid_cen)[idx_folds, ]
+  out_cv <- do.call(rbind, cv_fit_hal_joint$hat_valid_out)[idx_folds, ]
   
   # Define negative log-likelihood function
   nll <- function(obs, probs) {
     -sum(obs * log(probs) + (1 - obs) * log(1 - probs))
   }
-  
   # Compute CV-NLL for each lammda1 for censoring model
   cv_nloglik_cen <- apply(cen_cv, 2, function(cen_hat) {
     nll(obs = data_in[, get(y_cen_names)], probs = cen_hat)
   })
-  
   # Compute CV-NLL for each lammda2 for outcome model
   cv_nloglik_out <- apply(out_cv, 2, function(out_hat) {
     nll(obs = data_in[, get(y_out_names)], probs = out_hat)
@@ -337,7 +228,6 @@ fit_cv_hal_joint <- function(data_in, folds,
   
   # Create a grid of all (lambda_seq1, lambda_seq2) combinations
   cv_nloglik_sum <- outer(cv_nloglik_cen, cv_nloglik_out, "+")  # Compute sum for each pair
-  
   # Find the indices of the best combination (minimizing the sum)
   best_lambda_idx <- which(cv_nloglik_sum == min(cv_nloglik_sum), arr.ind = TRUE)
   best_lambda1 <- best_lambda_idx[1, 1]  # Best lambda1 index for cen model
@@ -347,18 +237,18 @@ fit_cv_hal_joint <- function(data_in, folds,
 }
 
 
-mod_update_halcv <- function(data, lambda_seq1 = exp(seq(-0.5, -20, length = 20)), 
+mod_update_halcv <- function(data, folds, lambda_seq1 = exp(seq(-0.5, -20, length = 20)), 
                              lambda_seq2 = exp(seq(-0.5, -20, length = 20)), 
                              basis_list = NULL, k_folds = 5, plot_diagnostics = TRUE) {
   
   if (is.null(data$w_norm)) { data$w_norm <- 1 }
   
-  X <- as.matrix(data[, c("L1", "L2", "L3", "A", "M")])
-  Y_cen <- data$censored
-  Y_out <- data$Y
-  weights <- data$w_norm
+  x_names = c("L1", "L2", "L3", "A", "M")
+  y_cen_names = "censored"
+  y_out_names = "Y"
+  weights_names = "w_norm"
   
-  cv_result <- fit_cv_hal_joint(data = data_in, folds, 
+  cv_result <- fit_cv_hal_joint(data_in = data, folds, 
                                 x_names, y_cen_names, y_out_names, weights_names, 
                                 lambda_seq1, lambda_seq2)
   best_lambda <- cv_result$best_lambda
@@ -386,7 +276,7 @@ mod_update_halcv <- function(data, lambda_seq1 = exp(seq(-0.5, -20, length = 20)
     Y = as.numeric(data_in[, get(y_out_names)]),
     weights = as.numeric(data_in[, get(weights_names)]), 
     family = "binomial", 
-    lambda = best_lambda[1], 
+    lambda = best_lambda[2], 
     # max_degree = 3, reduce_basis = 1 / sqrt(nrow(X)), smoothness_orders = 0,
     basis_list = basis_list, fit_control = list(cv_select = FALSE)
   )
@@ -401,59 +291,14 @@ mod_update_halcv <- function(data, lambda_seq1 = exp(seq(-0.5, -20, length = 20)
 }
 
 # Run the updated HAL fitting function
-system.time({ cv_halmod_pred <- mod_update_halcv(data_imputed)})
+# Define folds
+folds <- origami::make_folds(n = n, V = 5)
+system.time({cv_halmod_pred <- mod_update_halcv(data_imputed)})
 # Access results
 cv_halmod_pred$cen_prob     # Predicted probabilities for the censoring model
 cv_halmod_pred$out_prob     # Predicted probabilities for the outcome model
 cv_halmod_pred$best_lambda  # Optimal lambda selected
 cv_halmod_pred$basis_list   # Shared basis functions
-
-
-fit_cv_hal_joint <- function(data, X, Y_cen, Y_out, weights, lambda_seq1, lambda_seq2, basis_list, k_folds) {
-  if (is.null(basis_list)) {
-    basis_list <- hal9001::enumerate_basis(X, max_degree = 3, smoothness_orders = 0)
-  }
-  
-  # K-fold Cross-Validation
-  folds <- sample(rep(1:k_folds, length.out = nrow(X)))
-  mean_joint_losses <- matrix(NA, length(lambda_seq1), length(lambda_seq2))
-  
-  for (fold in 1:k_folds) {
-    train_idx <- which(folds != fold)
-    val_idx <- which(folds == fold)
-    
-    X_train <- X[train_idx, ]
-    Y_cen_train <- Y_cen[train_idx]
-    Y_out_train <- Y_out[train_idx]
-    weights_train <- weights[train_idx]
-    
-    X_val <- X[val_idx, ]
-    Y_cen_val <- Y_cen[val_idx]
-    Y_out_val <- Y_out[val_idx]
-    
-    for (i in seq_along(lambda_seq1)) {
-      for (j in seq_along(lambda_seq2)) {
-        loss <- fit_cv_hal(lambda_seq1[i], lambda_seq2[j], X_train, Y_cen_train, Y_out_train, weights_train, basis_list, X_val, Y_cen_val, Y_out_val)
-        mean_joint_losses[i, j] <- ifelse(is.na(mean_joint_losses[i, j]), loss, mean_joint_losses[i, j] + loss)
-      }
-    }
-  }
-  
-  mean_joint_losses <- mean_joint_losses / k_folds
-  best_lambda_idx <- which(mean_joint_losses == min(mean_joint_losses), arr.ind = TRUE)
-  
-  best_lambda1 <- lambda_seq1[best_lambda_idx[1]]
-  best_lambda2 <- lambda_seq2[best_lambda_idx[2]]
-  
-  return(list(
-    best_lambda = c(best_lambda1, best_lambda2),
-    lambda_seq1 = lambda_seq1,
-    lambda_seq2 = lambda_seq2,
-    mean_joint_losses = mean_joint_losses
-  ))
-}
-
-
 
 
 
