@@ -1,11 +1,12 @@
-#remotes::install_github("nhejazi/medoutcon")
-#devtools::install_github("tlverse/tlverse")
+remotes::install_github("nhejazi/medoutcon")
+devtools::install_github("tlverse/tlverse")
 library(data.table) # Assuming 'data' is a data.table
 library(dplyr)
 library(sl3)
 library(hal9001)
 library(medoutcon)
 library(truncnorm)
+library(xgboost)
 n_obs <- 5000
 
 (data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.3))
@@ -19,26 +20,26 @@ dataset <- data$study_dat
 dataset
 
 
-
-
 NaiveImpute <- function(data, LOD = LOD_value) {
-  # Duplicate and impute LOD rows
-  imputed_rows_list <- lapply(1:nrow(data[data$M == "LOD", ]), function(i) {
-    replicated_row <- data[data$M == "LOD", ]
-    replicated_row$M <- LOD_value/2
-    return(replicated_row)
-  })
+  # Identify rows where M == "LOD"
+  lod_rows <- data[data$M == "LOD", , drop = FALSE]
   
-  # Combine non-LOD data with imputed LOD rows
-  data <- rbind(data[data$M != "LOD", ], do.call(rbind, imputed_rows_list))
-  # Convert all character columns to numeric or factor as needed
-  data <- data %>%
-    mutate(across(where(is.character), as.numeric))
-  # Ensure the outcome and weights are numeric
+  # If there are LOD rows, replace M with LOD_value / 2
+  if (nrow(lod_rows) > 0) {
+    lod_rows$M <- as.numeric(LOD) / 2
+  }
+  
+  # Combine original non-LOD data with imputed LOD rows
+  data <- rbind(data[data$M != "LOD", ], lod_rows)
+  # Ensure M is numeric
+  data$M <- as.numeric(data$M)
+  # Ensure outcome and weights are numeric
   data$censored <- as.numeric(data$censored)
   data$w_norm <- rep(1, nrow(data))
+  data <- data %>% arrange(id)
   return(data)
 }
+
 
 NaiveImpute(dataset, LOD = LOD_value)
 
@@ -279,8 +280,6 @@ nde_gcom_glm$nde.rd
 gcom_boots_ci <- function(data, n_bootstrap = 10, alpha = 0.05, type = c("NDE", "NIE")) {
   n <- nrow(data)
   boots_est <- numeric(n_bootstrap)
-  
-  set.seed(123)  # For reproducibility
   for (i in seq_len(n_bootstrap)) {
     # Resample data with replacement
     bootstrap_sample <- data[sample(1:n, size = n, replace = TRUE), ]
@@ -306,7 +305,6 @@ gcom_boots_ci <- function(data, n_bootstrap = 10, alpha = 0.05, type = c("NDE", 
 
 # Example usage with your dataset
 (res1 <- gcom_boots_ci(dat_aug, type = "NDE"))
-
 
 gcomp.nie <- function(data) {
   # Extract variables from the dataset
@@ -344,24 +342,22 @@ nie_gcom_glm
 
 est_med_effs <- function(dat_aug) {
   # Load necessary libraries
-  library(sl3)
-  library(tlverse)
+  # library(sl3)
+  # library(tlverse)
   
   # Instantiate learners
-  mean_lrnr <- Lrnr_mean$new()
   fglm_lrnr <- Lrnr_glm_fast$new()
+  lrn_ridge <- Lrnr_glmnet$new(alpha = 0)
   lasso_lrnr <- Lrnr_glmnet$new(alpha = 1, nfolds = 3)
+  lrn_earth <- Lrnr_earth$new()
   rf_lrnr <- Lrnr_ranger$new(num.trees = 200)
+  # fast highly adaptive lasso (HAL) implementation
+  lrn_hal <- Lrnr_hal9001$new(max_degree = 2, num_knots = c(3,2), nfolds = 5)
+  lrn_xgb <- Lrnr_xgboost$new()
   
   # Create learner library and instantiate super learner ensemble
-  lrnr_lib <- Stack$new(mean_lrnr, fglm_lrnr, lasso_lrnr, rf_lrnr)
+  lrnr_lib <- Stack$new(fglm_lrnr, lrn_ridge, lasso_lrnr, lrn_xgb)
   sl_lrnr <- Lrnr_sl$new(learners = lrnr_lib, metalearner = Lrnr_nnls$new())
-  
-  # Define a helper function to extract summary results as a vector
-  extract_summary <- function(result) {
-    summary_data <- summary(result)
-    return(unlist(summary_data)) # Flatten to a vector
-  }
   
   # Compute one-step and TMLE estimates for NDE and NIE
   nde_onestep_glm <- medoutcon(
@@ -371,12 +367,12 @@ est_med_effs <- function(dat_aug) {
     M = dat_aug$M,
     Y = dat_aug$Y,
     obs_weights = dat_aug$w_norm,
-    g_learners = lasso_lrnr,
-    h_learners = lasso_lrnr,
-    b_learners = lasso_lrnr,
+    g_learners = sl_lrnr, # PS  # interaction here lasso of PS is not good
+    h_learners = sl_lrnr, # modefied PS with Mediator.  hard to model P(A | M, L)
+    b_learners = lasso_lrnr, # Outcome regresssion
     effect = "direct",
     estimator = "onestep",
-    estimator_args = list(cv_folds = 5)
+    estimator_args = list(cv_folds = 3)
   )
   
   nde_tmle_glm <- medoutcon(
@@ -386,12 +382,12 @@ est_med_effs <- function(dat_aug) {
     M = dat_aug$M,
     Y = dat_aug$Y,
     obs_weights = dat_aug$w_norm,
-    g_learners = lasso_lrnr,
-    h_learners = lasso_lrnr,
+    g_learners = sl_lrnr,
+    h_learners = sl_lrnr,
     b_learners = lasso_lrnr,
     effect = "direct",
     estimator = "tmle",
-    estimator_args = list(cv_folds = 5)
+    estimator_args = list(cv_folds = 3)
   )
   
   nie_onestep_glm <- medoutcon(
@@ -401,12 +397,12 @@ est_med_effs <- function(dat_aug) {
     M = dat_aug$M,
     Y = dat_aug$Y,
     obs_weights = dat_aug$w_norm,
-    g_learners = lasso_lrnr,
-    h_learners = lasso_lrnr,
+    g_learners = sl_lrnr,
+    h_learners = sl_lrnr,
     b_learners = lasso_lrnr,
     effect = "indirect",
     estimator = "onestep",
-    estimator_args = list(cv_folds = 5)
+    estimator_args = list(cv_folds = 3)
   )
   
   nie_tmle_glm <- medoutcon(
@@ -416,12 +412,12 @@ est_med_effs <- function(dat_aug) {
     M = dat_aug$M,
     Y = dat_aug$Y,
     obs_weights = dat_aug$w_norm,
-    g_learners = lasso_lrnr,
-    h_learners = lasso_lrnr,
+    g_learners = sl_lrnr,
+    h_learners = sl_lrnr,
     b_learners = lasso_lrnr,
     effect = "indirect",
     estimator = "tmle",
-    estimator_args = list(cv_folds = 5)
+    estimator_args = list(cv_folds = 3)
   )
   
   nde_onestep <- summary(nde_onestep_glm)
@@ -444,52 +440,102 @@ est_med_effs <- function(dat_aug) {
 
 (medeff <- est_med_effs(dat_aug))
 str(medeff)
-str(medeff$nde_onestep_glm)
+str(medeff$nde_onestep_est)
+
 
 
 MC_sim <- function(r, n_obs, type = c("Trad", "EM-MLE"), censor_rate = 0.3, beta_m = c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)) {
-  output_file <- paste0("MED", "JAN", type, "n_", n_obs, ".txt")
+  type <- match.arg(type)
+  output_file <- paste0("MED_FEB04_", type, "_n_", n_obs, ".txt")
   
   for (i in 1:r) {
-    # Generate data
     data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = censor_rate)
+    simdata<- data$study_dat
     LOD_value <- as.numeric(data$lod)
-    dataset <- data$study_dat
     
     if (type == "Trad") {
-      dat_aug <- NaiveImpute(dataset, LOD_value)
+      data_aug <- NaiveImpute(simdata, LOD_value)
     } else if (type == "EM-MLE") {
-      # Run the EM algorithm
-      em_result <- EM_algorithm(dataset, beta_m)
-      dat_aug <- em_result$data_weted
-      #Using updated beta_m
-      beta_m <- em_result$beta_m
+      em_result <- EM_algorithm(simdata, beta_m)
+      data_aug <- em_result$data_weted
+      beta_m <- em_result$beta_m  # Persisting update
     }
     
-    # G-computation estimates
-    nde_gcom_glm <- gcomp.nde(dat_aug)
-    CI.nde <- gcom_boots_ci(dat_aug, type = "NDE")$ci
-    nie_gcom_glm <- gcomp.nie(dat_aug)
-    CI.nie <- gcom_boots_ci(dat_aug, type = "NIE")$ci
+    # G-computation
+    nde_gcom_glm <- gcomp.nde(data_aug)
+    CI.nde <- gcom_boots_ci(data_aug, type = "NDE")$ci
+    nie_gcom_glm <- gcomp.nie(data_aug)
+    CI.nie <- gcom_boots_ci(data_aug, type = "NIE")$ci
     
-    # Estimation using the custom mediation function
-    med_effects <- est_med_effs(dat_aug)
+    # Custom mediation estimates
+    medeff <- est_med_effs(data_aug)
     
     # Save results
-    write(
-      c(i, nde_gcom_glm$nde.rd, CI.nde, nie_gcom_glm$nid.rd, CI.nie, medeff$nde_onestep_est, medeff$nde_onestep_ci,
-        medeff$nde_tmle_est, medeff$nde_tmle_ci, medeff$nie_onestep_est, medeff$nie_onestep_ci, medeff$nie_tmle_est, medeff$nie_tmle_ci),
-      file = output_file,
-      ncolumns = 50,
-      append = TRUE
-    )
+    results <- c(i, 
+                 nde_gcom_glm$nde.rd, CI.nde, 
+                 nie_gcom_glm$nie.rd, CI.nie, 
+                 medeff$nde_onestep_est, medeff$nde_onestep_ci,
+                 medeff$nde_tmle_est, medeff$nde_tmle_ci, 
+                 medeff$nie_onestep_est, medeff$nie_onestep_ci, 
+                 medeff$nie_tmle_est, medeff$nie_tmle_ci)
+    
+    write(results, file = output_file, ncolumns = length(results), append = TRUE)
   }
+  
+  return(beta_m)  # Returning the final beta_m if needed
 }
 
-# Example usage
-r <- 2   # Number of replicates
-n_obs <- 500  # Number of observations per replicate
 
+# Example usage
+r <- 1000   # Number of replicates
+n_obs <- 1000  # Number of observations per replicate
+
+sim.res <- MC_sim(r = r, type = "EM-MLE", n_obs = n_obs)
 sim.res <- MC_sim(r = r, type = "Trad", n_obs = n_obs)
+
+
+
+
+
+
+
+
+
+
+MC_sim <- function(r, n_obs, type = c("Trad", "EM-MLE"), censor_rate = 0.3, beta_m = c(A = 0.5, L1 = 0.3, L2 = 0.2, L3 = 0.1, sd = 1)) {
+  type <- match.arg(type)
+  output_file <- paste0("MED_FEB04_", type, "_n_", n_obs, ".txt")
+  
+  for (i in 1:r) {
+    data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = censor_rate)
+    simdata<- data$study_dat
+    LOD_value <- as.numeric(data$lod)
+    
+    if (type == "Trad") {
+      data_aug <- NaiveImpute(simdata, LOD_value)
+    } else if (type == "EM-MLE") {
+      em_result <- EM_algorithm(simdata, beta_m)
+      data_aug <- em_result$data_weted
+      beta_m <- em_result$beta_m  # Persisting update
+    }
+    
+    # G-computation
+    nde_gcom_glm <- gcomp.nde(data_aug)
+    CI.nde <- gcom_boots_ci(data_aug, type = "NDE")$ci
+    nie_gcom_glm <- gcomp.nie(data_aug)
+    CI.nie <- gcom_boots_ci(data_aug, type = "NIE")$ci
+    
+    # Save results
+    results <- c(i, 
+                 nde_gcom_glm$nde.rd, CI.nde, 
+                 nie_gcom_glm$nie.rd, CI.nie)
+    
+    write(results, file = output_file, ncolumns = length(results), append = TRUE)
+  }
+  
+  return(beta_m)  # Returning the final beta_m if needed
+}
+
+
 
 

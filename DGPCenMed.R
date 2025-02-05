@@ -27,7 +27,7 @@ Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, lod = NULL, censor_r
     if (random) {
       return(rep(0.5, length(L1)))  # Fixed probability if randomized
     } else {
-      return(plogis(-1.25 + 0.25 * L1 + 1.25 * L2 + 0.5 * L3 - 2.5 * L1 * L3))
+      return(plogis(-1.25 + 0.25 * L1 + 1.25 * L2 + 0.5 * L3 - 2.5 * L1 * L3)) # interactions
     }
   }
   gA_obs <- gA(L1, L2, L3, random)
@@ -35,7 +35,7 @@ Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, lod = NULL, censor_r
   
   # Generate post-infection biomarker (RNA quantity) from a log-normal distribution
   QM <- function(A, L1, L2, L3) {
-    QM <- A * (L1 + 2 * L2 - L3)
+    QM <- A * (L1 + 2 * L2 - L3) # hard to model P(A | M, L) since DGP of M
     return(list(QM = QM))
   }
   QM_obs <- QM(A, L1, L2, L3)
@@ -48,13 +48,13 @@ Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, lod = NULL, censor_r
     lod <- quantile(M_full, probs = censor_rate)  # Set LOD as a fixed quantile of simulated data if not provided
   }
   censored <- M_full < lod                         # Identify which values are censored
-# Assign censored and uncensored values
+  # Assign censored and uncensored values
   M <- M_full
   M[censored] <- "LOD"   # Replace censored values with "LOD"
   
   # Generate the outcome of interest
   QY <- function(A, M, L1, L2, L3) {
-    -1.25 + 2 * A + 0.5 * M - 0.25 * L1 - 0.5 * L2 -0.5 * L3
+    -1.25 + 2 * A + 0.5 * M - 0.25 * L1 - 0.5 * L2 -0.5 * L3 # additive model lasso is ok. 
   }
   QY_obs <- QY(A, M_full, L1, L2, L3)
   Yprob <- plogis(QY_obs)  # Convert to probabilities using the logistic function
@@ -152,7 +152,7 @@ get_truth <- function(gen_data, random = FALSE, n_truth = 1e7) {
   QY_Ais1_mech <- rbinom(n_truth, 1, plogis(Y_Ais1_mech) )
   QY_Ais0_mech <- rbinom(n_truth, 1, plogis(Y_Ais0_mech) )
   
-
+  
   # Compute average treatment effect (ATE) via plug-in in "asymptotic" sample
   ate_rd <- mean(QY_Ais1_mech) - mean(QY_Ais0_mech)
   ate_rr <- mean(QY_Ais1_mech)/mean(QY_Ais0_mech)
@@ -169,7 +169,7 @@ get_truth <- function(gen_data, random = FALSE, n_truth = 1e7) {
   nde_rd <- mean(QY_corss_mech) - mean(QY_Ais0_mech)  # Natural Direct Effect RD
   nde_rr <- mean(QY_corss_mech)/mean(QY_Ais0_mech)  # Natural Direct Effect RD
   nde_or <- (mean(QY_corss_mech)/(1-mean(QY_corss_mech)) )/(mean(QY_Ais0_mech)/(1 - mean(QY_Ais0_mech)))  # Natural Direct Effect RD
-
+  
   
   # Compute the variance bound via the EIF
   # EIF for ATE
