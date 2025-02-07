@@ -6,7 +6,7 @@ library(medoutcon)
 library(truncnorm)
 library(origami)
 library(future.apply)
-n_obs <- 5000
+n_obs <- 500
 
 (data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.3))
 (LOD <- data$lod)
@@ -119,14 +119,15 @@ mod_pred$cen_coef
 
 #############
 # METHOD 2
-cv_hal_joint <- function(data_in, fold, x_names, y_cen_names, y_out_names, weights_names,
+fold = folds[[1]]
+cv_hal_joint <- function(fold, data_in, x_names, y_cen_names, y_out_names, weights_names,
                          lambda_seq1 = exp(seq(-0.5, -20, length = 1e4)), 
                          lambda_seq2 = exp(seq(-0.5, -20, length = 1e4)), 
-                         basis_list = NULL) {
+                         basis_list) {
   
   ## 0) cross-validation via origami
-  train_data <- origami::training(data_in, fold)
-  valid_data <- origami::validation(data_in, fold)
+  train_data <- origami::training(data_in)
+  valid_data <- origami::validation(data_in)
   
   x_train <- as.matrix(train_data[, ..x_names])
   y_cen_train <- as.numeric(train_data[, get(y_cen_names)])
@@ -144,31 +145,29 @@ cv_hal_joint <- function(data_in, fold, x_names, y_cen_names, y_out_names, weigh
     X = x_train, Y = y_cen_train, weights = weights_train, family = "binomial", 
     lambda = lambda_seq1,
     max_degree = NULL,
-    return_x_basis = TRUE,
-    basis_list = basis_list,fit_control = list(cv_select = FALSE)
+    basis_list = basis_list, fit_control = list(cv_select = FALSE)
   )
   
   out_mod <- hal9001::fit_hal(
     X = x_train, Y = y_out_train, weights = weights_train, family = "binomial", 
     lambda = lambda_seq2,
-    max_degree = 2, reduce_basis = 2 / sqrt(nrow(x_train)), smoothness_orders = 0,
-    basis_list = basis_list, fit_control = list(cv_select = FALSE),
-    return_x_basis = TRUE
+    reduce_basis = 2 / sqrt(nrow(x_train)),
+    basis_list = basis_list, fit_control = list(cv_select = FALSE)
   )
   # get coefficients
-  coef_mat_cen <- rbind(cen_mod$glmnet_lasso$a0, cen_mod$glmnet_lasso$beta) #     cen_coef = coef(cen_mod)
-  coef_mat_out <- rbind(out_mod$glmnet_lasso$a0, out_mod$glmnet_lasso$beta) #     out_coef = coef(out_mod)
+  coef_mat_cen <- cen_mod$coefs #     cen_coef = coef(cen_mod)
+  coef_mat_out <- out_mod$coefs #     out_coef = coef(out_mod)
   
   ## 2) predictions on validation data for each value of lambda
-  valid_x_basis <- hal9001::make_design_matrix(x_valid, cen_mod$basis_list)
+  valid_x_basis <- hal9001::make_design_matrix(x_valid, basis_list)
   valid_x_basis_clean <- valid_x_basis[, as.numeric(names(cen_mod$copy_map))]
   pred_mat <- cbind(rep(1, nrow(x_valid)), valid_x_basis_clean)
   
   #preds_valid <- as.matrix(pred_mat %*% coef_mat)
-  hat_valid_cen <- as.matrix(pred_mat %*% coef_mat_cen)
-  hat_valid_cen <- apply(hat_valid_cen, 2, stats::plogis)
-  hat_valid_out <- as.matrix(pred_mat %*% coef_mat_out)
-  hat_valid_out <- apply(hat_valid_out, 2, stats::plogis)
+  hat_val_cen <- as.matrix(pred_mat %*% coef_mat_cen)
+  hat_valid_cen <- apply(hat_val_cen, 2, stats::plogis). # for binary outcome
+  hat_val_out <- as.matrix(pred_mat %*% coef_mat_out)
+  hat_valid_out <- apply(hat_val_out, 2, stats::plogis)
   # OR ??? 
   #hat_valid_cen <- predict(cen_mod, new_data = x_val, type = "response")
   #hat_valid_out <- predict(out_mod, new_data = x_val, type = "response")
@@ -176,13 +175,13 @@ cv_hal_joint <- function(data_in, fold, x_names, y_cen_names, y_out_names, weigh
   return(list(
     cen_mod = cen_mod,
     out_mod = out_mod,
-    cen_coef = coef(cen_mod),
-    out_coef = coef(out_mod),
     hat_valid_cen = hat_valid_cen,
     hat_valid_out = hat_valid_out
   ))
 }
 
+
+cv_hal_joint(fold = folds[[1]], data_in = data_imputed)
 
 fit_cv_hal_joint <- function(data_in, folds, 
                              x_names, y_cen_names, y_out_names, weights_names, 
@@ -190,7 +189,7 @@ fit_cv_hal_joint <- function(data_in, folds,
                              basis_list = NULL) {
   # fit enumerate_basis on full data to get set of basis functions
   if (is.null(basis_list)) {
-    basis_list <- hal9001::enumerate_basis(as.matrix(data_in[, ..x_names]), max_degree = 3, smoothness_orders = 0)
+    basis_list <- hal9001::enumerate_basis(as.matrix(data_in[, ..x_names]), max_degree = 2, smoothness_orders = 1)
   }
   
   # fit a cross-validated joint HAL for the Censoring and Outcome Models
@@ -210,8 +209,9 @@ fit_cv_hal_joint <- function(data_in, folds,
   idx_folds <- do.call(c, lapply(folds, `[[`, "validation_set"))
   
   # Combine predictions
-  cen_cv <- do.call(rbind, cv_fit_hal_joint$hat_valid_cen)[idx_folds, ]
-  out_cv <- do.call(rbind, cv_fit_hal_joint$hat_valid_out)[idx_folds, ]
+  cen_cv <- do.call(rbind, list(cv_fit_hal_joint$hat_valid_cen))[idx_folds, ]
+  out_cv <- do.call(rbind, list(cv_fit_hal_joint$hat_valid_out))[idx_folds, ] 
+  
   
   # Define negative log-likelihood function
   nll <- function(obs, probs) {
@@ -239,7 +239,7 @@ fit_cv_hal_joint <- function(data_in, folds,
 
 mod_update_halcv <- function(data, folds, lambda_seq1 = exp(seq(-0.5, -20, length = 20)), 
                              lambda_seq2 = exp(seq(-0.5, -20, length = 20)), 
-                             basis_list = NULL, k_folds = 5, plot_diagnostics = TRUE) {
+                             basis_list = NULL, k_folds = 5, plot_diagnostics = FALSE) {
   
   if (is.null(data$w_norm)) { data$w_norm <- 1 }
   
@@ -292,8 +292,8 @@ mod_update_halcv <- function(data, folds, lambda_seq1 = exp(seq(-0.5, -20, lengt
 
 # Run the updated HAL fitting function
 # Define folds
-folds <- origami::make_folds(n = n, V = 5)
-system.time({cv_halmod_pred <- mod_update_halcv(data_imputed)})
+folds <- origami::make_folds(n = nrow(data_imputed), V = 2)
+system.time({cv_halmod_pred <- mod_update_halcv(data_imputed, folds)})
 # Access results
 cv_halmod_pred$cen_prob     # Predicted probabilities for the censoring model
 cv_halmod_pred$out_prob     # Predicted probabilities for the outcome model

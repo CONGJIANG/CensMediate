@@ -537,5 +537,3 @@ MC_sim <- function(r, n_obs, type = c("Trad", "EM-MLE"), censor_rate = 0.3, beta
 }
 
 
-
-
