@@ -51,6 +51,28 @@ sample_truncated_proposal <- function(n, data, LOD, beta_m) {
   rtruncnorm(n, a = 0, b = LOD, mean = beta_m["A"] * data$A + meanL, sd = beta_m["sd"])
 }
 
+sample_density_proposal <- function(n, data, LOD, beta_m) {
+  # Linear predictor for L variables
+  meanL <- as.matrix(data[c("L1", "L2", "L3")]) %*% beta_m[c("L1", "L2", "L3")]
+  # Mean calculation for the normal distribution
+  means <- beta_m["A"] * data$A + meanL
+  # Initialize an empty vector to store valid samples
+  valid_samples <- numeric(0)
+  
+  # Log-normal sampling loop until we have enough valid samples
+  while (length(valid_samples) < n) {
+    # Draw more samples to fill the request
+    remaining <- n - length(valid_samples)
+    # Draw samples from a log-normal distribution
+    samples <- rlnorm(remaining, meanlog = means, sdlog = beta_m["sd"])
+    # Append valid samples (less than LOD)
+    valid_samples <- c(valid_samples, samples[samples < LOD])
+  }
+  
+  # Return only the first n valid samples
+  return(valid_samples[1:n])
+}
+
 # Density Function to compute f(M)
 compute_f_M <- function(data, LOD, beta_m) {
   # Calculate the means for each data point
@@ -61,6 +83,19 @@ compute_f_M <- function(data, LOD, beta_m) {
   return(f_M)
 }
 
+
+compute_f_M <- function(data, beta_m) {
+  # Calculate linear predictors for the mean of the normal distribution
+  meanL <- as.matrix(data[, .(L1, L2, L3)]) %*% beta_m[c("L1", "L2", "L3")]
+  # Total predicted mean
+  means <- beta_m["A"] * data$A + meanL
+  
+  # Compute the log-normal density for each M
+  # Convert the mean to a log scale for log-normal parameters
+  f_M <- dlnorm(data$M, meanlog = log(means), sdlog = beta_m["sd"])
+  
+  return(f_M)
+}
 
 
 
@@ -75,7 +110,7 @@ Impute_step <- function(data, beta_m, S, LOD = LOD_value) {
   # Duplicate and impute LOD rows
   imputed_rows_list <- lapply(1:nrow(data[data$M == "LOD", ]), function(i) {
     replicated_row <- data[data$M == "LOD", ][rep(i, S), , drop = FALSE]
-    replicated_row$M <- sample_truncated_proposal(
+    replicated_row$M <- sample_density_proposal(
       n = S,
       data = as.data.frame(replicated_row),
       LOD = LOD,
@@ -95,7 +130,9 @@ Impute_step <- function(data, beta_m, S, LOD = LOD_value) {
 }
 
 (data_imputed <- Impute_step(data = dataset, beta_m, S = 10))
+summary(data_imputed$M)
 
+hist(data_imputed$M)
 
 mod_update_glm <- function(data) {
   # Check and assign w_norm if NULL
@@ -535,5 +572,3 @@ MC_sim <- function(r, n_obs, type = c("Trad", "EM-MLE"), censor_rate = 0.3, beta
   
   return(beta_m)  # Returning the final beta_m if needed
 }
-
-
