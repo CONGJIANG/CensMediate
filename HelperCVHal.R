@@ -8,9 +8,10 @@ library(medoutcon)
 library(truncnorm)
 library(xgboost)
 library(logistf)
+library(zoo) 
 n_obs <- 300
 
-(data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.5))
+(data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.1))
 (LOD <- data$lod)
 (LOD_value <- as.numeric(data$lod))
 
@@ -112,8 +113,27 @@ LOD_value <- as.numeric(data$lod)  # Set the LOD value
 
 #############
 # METHOD 2
-folds <- origami::make_folds(n = nrow(data_impu), V = 2)
+folds <- origami::make_folds(n = nrow(data_impu), V = 5)
 fold <- folds[[1]]
+
+fill_hat_valid <- function(mat, all_cols) {
+  existing_cols <- colnames(mat)  # Columns present in this fold
+  missing_cols <- setdiff(all_cols, existing_cols)  # Identify missing columns
+  
+  # If there are missing columns, add them with last observed value
+  if (length(missing_cols) > 0) {
+    last_values <- apply(mat, 1, function(col) tail(na.omit(col), 1))  # Get last observed value per row
+    # Repeat the vector m times and make it a matrix
+    n_cols <- length(missing_cols)  # Number of columns you want
+    missing_mat <- matrix(rep(round(last_values, 7), times = 1*n_cols), ncol = n_cols, byrow = FALSE)
+    colnames(missing_mat) <- missing_cols  # Assign column names
+    mat <- cbind(mat, missing_mat)  # Combine with original matrix
+  }
+  
+  # Reorder columns to match all_cols
+  mat <- mat[, all_cols, drop = FALSE]  
+  return(mat)
+}
 cv_hal_joint <- function(fold, data_in,
                          x_names, y_cen_names, y_out_names, weights_names,
                          lambda_seq1 = exp(seq(-0.5, -20, length = 1000)),
@@ -167,19 +187,26 @@ cv_hal_joint <- function(fold, data_in,
   # hat_valid_cen <- predict(cen_mod, new_data = x_val, type = "response")
   # hat_valid_out <- predict(out_mod, new_data = x_val, type = "response")
   
+  
+  # Get all unique column names across folds
+  all_cols <- paste0("s", seq(0, length(lambda_seq1)-1))
+  
+  if(dim(hat_valid_cen)[2] != length(lambda_seq1)){
+    hat_valid_cen <- fill_hat_valid(hat_valid_cen, all_cols)}
+  if(dim(hat_valid_out)[2] != length(lambda_seq2)){
+    hat_valid_out <- fill_hat_valid(hat_valid_out, all_cols)}
+  
   return(list(
     hat_valid_cen = hat_valid_cen,
     hat_valid_out = hat_valid_out
   ))
 }
 
-
 # Helper function: Define negative log-likelihood function
 # NOTE: using sl3::loss_loglik_binomial() below instead
 nll <- function(obs, probs) {
   obs * log(probs) + (1 - obs) * log(1 - probs)
 }
-
 
 fit_cv_hal_joint <- function(data_in, folds,
                              x_names, y_cen_names, y_out_names, weights_names,
@@ -206,6 +233,9 @@ fit_cv_hal_joint <- function(data_in, folds,
   
   # Extract validation indices from folds to reorder predictions
   idx_folds <- do.call(c, lapply(folds, `[[`, "validation_set"))
+  # lapply(cv_fit_hal_joint$hat_valid_cen, colnames)
+  lapply(cv_fit_hal_joint$hat_valid_cen, dim)
+  lapply(cv_fit_hal_joint$hat_valid_out, dim)
   
   # Combine predictions and reorder based on validation-set indices
   cen_cv <- do.call(rbind, cv_fit_hal_joint$hat_valid_cen)[order(idx_folds), ]
@@ -383,13 +413,14 @@ M_stepf_M(data = data_weted, beta_m = beta_m_start)
 
 
 # EM Algorithm
-EM_algorithm <- function(data, beta_m_0, S = 3, LOD = LOD_value, max_iter = 50, tol = 1e-10, verbose = TRUE) {
+EM_algorithm <- function(data, beta_m_0, S = 2, LOD = LOD_value, max_iter = 50, tol = 1e-10, verbose = TRUE) {
   iter <- 0; diff <- Inf; rel_diff <- Inf
   
   # I-Step: Initial Imputation
-  data_imputed <-   Impute_step(data, beta_m_0, S, LOD)
+  data_imputed <- Impute_step(data, beta_m_0, S, LOD)
   folds <- origami::make_folds(n = nrow(data_imputed), V = 5)
   cv_halmod_pred <- mod_update_halcv(data_imputed, folds)
+  halbasis <- cv_halmod_pred$basis_list
   
   beta_m <- beta_m_0
   start_time <- Sys.time()  # Track total runtime
@@ -412,7 +443,7 @@ EM_algorithm <- function(data, beta_m_0, S = 3, LOD = LOD_value, max_iter = 50, 
     # Parameter Update
     beta_m <- beta_m_new
     folds <- origami::make_folds(n = nrow(data_weted), V = 5)
-    cv_halmod_pred <- mod_update_halcv(data_weted, folds, basis_list = cv_halmod_pred$basis_list)
+    cv_halmod_pred <- mod_update_halcv(data_weted, folds, basis_list = halbasis)
     
     # Update diff with coefficient changes
     #diff <- diff + sum((mod_pred$cen_coef - cen_coef_old)^2) + sum((mod_pred$out_coef - out_coef_old)^2)

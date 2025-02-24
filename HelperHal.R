@@ -8,9 +8,10 @@ library(medoutcon)
 library(truncnorm)
 library(xgboost)
 library(logistf)
+library(zoo) 
 n_obs <- 300
 
-(data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.5))
+(data <- Study_dgp_Mcensor(n_obs = n_obs, censor_rate = 0.1))
 (LOD <- data$lod)
 (LOD_value <- as.numeric(data$lod))
 
@@ -112,140 +113,13 @@ LOD_value <- as.numeric(data$lod)  # Set the LOD value
 
 #############
 # METHOD 2
-folds <- origami::make_folds(n = nrow(data_impu), V = 2)
-fold <- folds[[1]]
-cv_hal_joint <- function(fold, data_in,
-                         x_names, y_cen_names, y_out_names, weights_names,
-                         lambda_seq1 = exp(seq(-0.5, -20, length = 1000)),
-                         lambda_seq2 = exp(seq(-0.5, -20, length = 1000)),
-                         basis_list) {
-  ## 0) set training and validation folds for cross-validation via origami
-  train_data <- origami::training(data_in)
-  valid_data <- origami::validation(data_in)
-  
-  # extract censoring status, outcome, adjustment set, weights for given split
-  x_train <- as.matrix(train_data[, ..x_names])
-  y_cen_train <- as.numeric(train_data[, get(y_cen_names)])
-  y_out_train <- as.numeric(train_data[, get(y_out_names)])
-  weights_train <- as.numeric(train_data[, get(weights_names)])
-  x_valid <- as.matrix(valid_data[, ..x_names])
-  y_cen_valid <- as.numeric(valid_data[, get(y_cen_names)])
-  y_out_valid <- as.numeric(valid_data[, get(y_out_names)])
-  weights_valid <- as.numeric(valid_data[, get(weights_names)])
-  
-  ## 1) fit HAL over sequence of lambda values
-  cen_mod <- hal9001::fit_hal(
-    X = x_train, Y = y_cen_train, weights = weights_train, family = "binomial",
-    lambda = lambda_seq1,
-    # max_degree = NULL,
-    basis_list = basis_list,
-    fit_control = list(cv_select = FALSE)
-  )
-  
-  out_mod <- hal9001::fit_hal(
-    X = x_train, Y = y_out_train, weights = weights_train, family = "binomial",
-    lambda = lambda_seq2,
-    # reduce_basis = 2 / sqrt(nrow(x_train)),
-    basis_list = basis_list,
-    fit_control = list(cv_select = FALSE)
-  )
-  # get coefficients
-  coef_mat_cen <- cen_mod$coefs #     cen_coef = coef(cen_mod)
-  coef_mat_out <- out_mod$coefs #     out_coef = coef(out_mod)
-  
-  ## 2) predictions on validation data for each value of lambda
-  valid_x_basis <- hal9001::make_design_matrix(x_valid, basis_list)
-  valid_x_basis_clean <- valid_x_basis[, as.numeric(names(cen_mod$copy_map))]
-  pred_mat <- cbind(rep(1, nrow(x_valid)), valid_x_basis_clean)
-  
-  # preds_valid <- as.matrix(pred_mat %*% coef_mat)
-  hat_val_cen <- as.matrix(pred_mat %*% coef_mat_cen)
-  hat_valid_cen <- apply(hat_val_cen, 2, stats::plogis) # for binary censoring indicator
-  hat_val_out <- as.matrix(pred_mat %*% coef_mat_out)
-  hat_valid_out <- apply(hat_val_out, 2, stats::plogis) # for binary outcome
-  # OR ???
-  # hat_valid_cen <- predict(cen_mod, new_data = x_val, type = "response")
-  # hat_valid_out <- predict(out_mod, new_data = x_val, type = "response")
-  
-  return(list(
-    hat_valid_cen = hat_valid_cen,
-    hat_valid_out = hat_valid_out
-  ))
-}
-
-
-# Helper function: Define negative log-likelihood function
-# NOTE: using sl3::loss_loglik_binomial() below instead
-nll <- function(obs, probs) {
-  obs * log(probs) + (1 - obs) * log(1 - probs)
-}
-
-
-fit_cv_hal_joint <- function(data_in, folds,
-                             x_names, y_cen_names, y_out_names, weights_names,
-                             lambda_seq1, lambda_seq2,
-                             basis_list) {
-  # fit a cross-validated joint HAL for the Censoring and Outcome Models
-  # NOTE: use set of basis functions discovered in initial enumerate_basis
-  cv_fit_hal_joint <- origami::cross_validate(
-    cv_fun = cv_hal_joint,
-    folds = folds,
-    data = data_in,
-    # arguments passed to cv_fun
-    x_names = x_names,
-    y_cen_names = y_cen_names,
-    y_out_names = y_out_names,
-    weights_names = weights_names,
-    lambda_seq1 = lambda_seq1,
-    lambda_seq2 = lambda_seq2,
-    basis_list = basis_list,
-    # back to arguments for cross_validate
-    use_future = FALSE,
-    .combine = FALSE
-  )
-  
-  # Extract validation indices from folds to reorder predictions
-  idx_folds <- do.call(c, lapply(folds, `[[`, "validation_set"))
-  
-  # Combine predictions and reorder based on validation-set indices
-  cen_cv <- do.call(rbind, cv_fit_hal_joint$hat_valid_cen)[order(idx_folds), ]
-  out_cv <- do.call(rbind, cv_fit_hal_joint$hat_valid_out)[order(idx_folds), ]
-  
-  # Compute CV-NLL(O_i) for each lambda in lambda_seq1 for censoring model
-  cv_nll_cen <- apply(cen_cv, 2, function(cen_hat) {
-    loss_loglik_binomial(cen_hat, data_in[, get(y_cen_names)])
-  })
-  # Compute CV-NLL(O_i) for each lambda in lambda_seq2 for outcome model
-  cv_nll_out <- apply(out_cv, 2, function(out_hat) {
-    loss_loglik_binomial(out_hat, data_in[, get(y_out_names)])
-  })
-  
-  # get each best idx, separately
-  best_lambda_cen_idx <- which.min(colMeans(cv_nll_cen))
-  best_lambda_out_idx <- which.min(colMeans(cv_nll_out))
-  
-  # create a grid of all (lambda_seq1, lambda_seq2) combinations
-  # compute sum of empirical risk for each pair (lambda1, lambda2)
-  cv_nll_sum <- outer(colMeans(cv_nll_cen), colMeans(cv_nll_out), "+")
-  
-  # find the indices of the best combination (minimizing the sum)
-  best_lambda_idx <- which(cv_nll_sum == min(cv_nll_sum), arr.ind = TRUE)
-  best_lambda_idx <- as_tibble(best_lambda_idx)
-  colnames(best_lambda_idx) <- c("cen", "out")
-  return(list(best_lambda_idx = best_lambda_idx, best_lambda_cen_idx = best_lambda_cen_idx,
-              best_lambda_out_idx = best_lambda_out_idx))
-}
-
-
-mod_update_halcv <- function(data, folds, lambda_seq1 = exp(seq(-0.5, -20, length = 1000)),
-                             lambda_seq2 = exp(seq(-0.5, -20, length = 1000)),
-                             basis_list = NULL) {
+mod_update_hal <- function(data, basis_list = NULL) {
+  # Check and assign w_norm if NULL (for the initial value of the weights)
   if (is.null(data$w_norm)) {
     data$w_norm <- 1
   }
   
   x_names <- c("L1", "L2", "L3", "A", "M")
-  y_cen_names <- "C"
   y_out_names <- "Y"
   weights_names <- "w_norm"
   
@@ -256,38 +130,14 @@ mod_update_halcv <- function(data, folds, lambda_seq1 = exp(seq(-0.5, -20, lengt
       max_degree = 2, smoothness_orders = 1
     )
   }
-  
-  best_lambda_idx <- fit_cv_hal_joint(
-    data_in = data, folds,
-    x_names, y_cen_names, y_out_names, weights_names,
-    lambda_seq1, lambda_seq2,
-    basis_list
-  )
-  
-  best_lambda_cen_idx <- best_lambda_idx$best_lambda_idx$cen[1]  # Extract first row if multiple
-  best_lambda_out_idx <- best_lambda_idx$best_lambda_idx$out[1]
-  
-  # Update HAL models with best lambda
-  cen_mod <- fit_hal(
-    X = as.matrix(data[, ..x_names]),
-    Y = as.numeric(data[, get(y_cen_names)]),
-    weights = as.numeric(data[, get(weights_names)]),
-    family = "binomial",
-    lambda = lambda_seq1[best_lambda_cen_idx],
-    # max_degree = 3, reduce_basis = 1 / sqrt(nrow(X)), smoothness_orders = 0,
-    basis_list = basis_list, fit_control = list(cv_select = FALSE)
-  )
-  
-  out_mod <- fit_hal(
+  # Function to fit HAL model
+  out_mod <- hal9001::fit_hal(
     X = as.matrix(data[, ..x_names]),
     Y = as.numeric(data[, get(y_out_names)]),
     weights = as.numeric(data[, get(weights_names)]),
     family = "binomial",
-    lambda = lambda_seq2[best_lambda_out_idx],
-    # max_degree = 3, reduce_basis = 1 / sqrt(nrow(X)), smoothness_orders = 0,
-    basis_list = basis_list, fit_control = list(cv_select = FALSE)
+    basis_list = basis_list
   )
-  
   
   out_probY1 <- predict(out_mod, new_data = as.matrix(data[, ..x_names]), type = "response")
   out_probY0 <- 1 - out_probY1
@@ -295,27 +145,18 @@ mod_update_halcv <- function(data, folds, lambda_seq1 = exp(seq(-0.5, -20, lengt
   # Create a new column for predicted probabilities based on observed Y values
   out_prob <- ifelse(data$Y == 1, out_probY1, out_probY0)
   
+  # Return predictions, coefficients, and terms
   return(list(
-    cen_coef = cen_mod$coefs,
-    out_coef = out_mod$coefs,
-    cen_prob = predict(cen_mod, new_data = as.matrix(data[, ..x_names]), type = "response"),
     out_prob = out_prob,
-    basis_list = basis_list,
-    best_lambda_idx = best_lambda_idx
+    basis_list = basis_list
   ))
 }
 
 system.time({
-  cv_halmod_pred <- mod_update_halcv(data = data_impu, folds)
+  cv_halmod_pred <- mod_update_hal(data = data_impu)
 })
 # Access results
-cv_halmod_pred$cen_prob # Predicted probabilities for the censoring model
 cv_halmod_pred$out_prob # Predicted probabilities for the outcome model
-
-cv_halmod_pred$cen_coef # Predicted probabilities for the censoring model
-cv_halmod_pred$out_coef # Predicted probabilities for the outcome model
-
-cv_halmod_pred$best_lambda # Optimal lambda selected
 cv_halmod_pred$basis_list # Shared basis functions
 
 # mod_pred are from mod_update_glm funciton, which inlucdes both out_prob and cen_prob
@@ -383,13 +224,14 @@ M_stepf_M(data = data_weted, beta_m = beta_m_start)
 
 
 # EM Algorithm
-EM_algorithm <- function(data, beta_m_0, S = 3, LOD = LOD_value, max_iter = 50, tol = 1e-10, verbose = TRUE) {
+EM_algorithm <- function(data, beta_m_0, S = 2, LOD = LOD_value, max_iter = 50, tol = 1e-10, verbose = TRUE) {
   iter <- 0; diff <- Inf; rel_diff <- Inf
   
   # I-Step: Initial Imputation
-  data_imputed <-   Impute_step(data, beta_m_0, S, LOD)
+  data_imputed <- Impute_step(data, beta_m_0, S, LOD)
   folds <- origami::make_folds(n = nrow(data_imputed), V = 5)
   cv_halmod_pred <- mod_update_halcv(data_imputed, folds)
+  halbasis <- cv_halmod_pred$basis_list
   
   beta_m <- beta_m_0
   start_time <- Sys.time()  # Track total runtime
@@ -412,7 +254,7 @@ EM_algorithm <- function(data, beta_m_0, S = 3, LOD = LOD_value, max_iter = 50, 
     # Parameter Update
     beta_m <- beta_m_new
     folds <- origami::make_folds(n = nrow(data_weted), V = 5)
-    cv_halmod_pred <- mod_update_halcv(data_weted, folds, basis_list = cv_halmod_pred$basis_list)
+    cv_halmod_pred <- mod_update_halcv(data_weted, folds, basis_list = halbasis)
     
     # Update diff with coefficient changes
     #diff <- diff + sum((mod_pred$cen_coef - cen_coef_old)^2) + sum((mod_pred$out_coef - out_coef_old)^2)

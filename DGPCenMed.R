@@ -27,43 +27,45 @@ Study_dgp_Mcensor <- function(n_obs = 5000, random = FALSE, lod = NULL, censor_r
     if (random) {
       return(rep(0.5, length(L1)))  # Fixed probability if randomized
     } else {
-      return(plogis(-1.25 + 0.25 * L1 + 1.25 * L2 + 0.5 * L3 - 2.5 * L1 * L3)) # interactions
+      return(plogis(-1 + 0.5 * L1 + 1.25 * L2 + 0.75 * L3 - 1.25 * L1 * L3)) # interactions
     }
   }
   gA_obs <- gA(L1, L2, L3, random)
   A <- rbinom(n_obs, 1, gA_obs)
+  # summary(A); hist(A)
   
   # Generate post-infection biomarker (RNA quantity) from a log-normal distribution
   QM <- function(A, L1, L2, L3) {
-    QM <- A * (L1 + 2 * L2 - L3) # hard to model P(A | M, L) since DGP of M
+    QM <- -3 + 1.5 * A + 1.75 * L1 + 1.5 * L2 - 0.25 * L3
     return(list(QM = QM))
   }
+  
   QM_obs <- QM(A, L1, L2, L3)
-  M_full <- rnorm(n_obs, QM_obs$QM + 2.5, 0.25)
-  # summary(M_full)
+  M_full <- rlnorm(n_obs, QM_obs$QM, 0.25)
+  summary(M_full); hist(M_full)
   # different distribution, e.g., round(rweibull(n_obs, shape = shape, scale = scale) * (1 + QM_obs$QM), 3)
   
   # Apply fixed LOD for censoring
   if (is.null(lod)) {
     lod <- quantile(M_full, probs = censor_rate)  # Set LOD as a fixed quantile of simulated data if not provided
   }
-  censored <- M_full < lod                         # Identify which values are censored
-  # Assign censored and uncensored values
+  C <- M_full >= lod  # Identify uncensored values (C = 1 if M_full >= lod)
   M <- M_full
-  M[censored] <- "LOD"   # Replace censored values with "LOD"
+  M[!C] <- "LOD"  # Replace values below LOD with "LOD"
   
   # Generate the outcome of interest
   QY <- function(A, M, L1, L2, L3) {
-    -1.25 + 2 * A + 0.5 * M - 0.25 * L1 - 0.5 * L2 -0.5 * L3 # additive model lasso is ok. 
+    -1 + 2.5 * A + 1.75 * M + 0.5*A*M - 2.25 * L1 - 1.75 * L2 - 1.5 * L3 # additive model lasso is ok. 
   }
   QY_obs <- QY(A, M_full, L1, L2, L3)
   Yprob <- plogis(QY_obs)  # Convert to probabilities using the logistic function
   Y <- rbinom(n_obs, 1, Yprob) 
-  summary(Y); hist(Y)
+  summary(Yprob); hist(Y)
+  hist(Yprob)
   
   # Create data frame and return
   study_dat <- data.table::setDT(
-    data.frame(id = seq(1, n_obs), L1, L2, L3, A, M, Y, censored = censored)
+    data.frame(id = seq(1, n_obs), L1, L2, L3, A, M, Y, C = C)
   )
   study_dat_full <- data.table::setDT(
     data.frame(id = seq(1, n_obs), L1, L2, L3, A, M = M_full, Y)
@@ -135,12 +137,12 @@ get_truth <- function(gen_data, random = FALSE, n_truth = 1e7) {
   # compute post-infection labs and biomarkers in "asymptotic" sample for
   # counterfactual data where all units are exposed (A = 1)
   QM_Ais1_mech <- with(wow_so_much_data, QM(1, L1, L2, L3))
-  M1_Ais1 <- rnorm(n_truth, QM_Ais1_mech$QM + 2.5, 0.25)
+  M1_Ais1 <- rlnorm(n_truth, QM_Ais1_mech$QM, 0.25)
   
   # compute post-infection labs and biomarkers in "asymptotic" sample for
   # counterfactual data where all units are unexposed (A = 0)
   QM_Ais0_mech <- with(wow_so_much_data, QM(0, L1, L2, L3))
-  M1_Ais0 <- rnorm(n_truth, QM_Ais0_mech$QM + 2.5, 0.25)
+  M1_Ais0 <- rlnorm(n_truth, QM_Ais0_mech$QM, 0.25)
   
   # Compute outcome of interest in "asymptotic" sample
   Y_mech <- with(wow_so_much_data, QY(A, M, L1, L2, L3))
@@ -192,7 +194,9 @@ get_truth <- function(gen_data, random = FALSE, n_truth = 1e7) {
   ))
 }
 
-(truth <- get_truth(gen_data = Study_dgp_Mcensor))
-truth
+#(truth <- get_truth(gen_data = Study_dgp_Mcensor))
 
 
+# $nde_rd [1] 0.4131817; $nie_rd [1] 0.3686884
+# $nde_rd [1] 0.4135181  $nie_rd [1] 0.3683857
+# $nde_rd [1]  0.4131935  $nie_rd [1] 0.3689446
